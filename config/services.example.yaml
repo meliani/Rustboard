@@ -1,0 +1,21 @@
+- id: "web-app"
+  name: "web-app"
+  host: "10.0.2.251"
+  port: 8000
+  ssh_user: "$(whoami)"
+  start_cmd: "systemctl start web-app"
+  stop_cmd: "systemctl stop web-app"
+  restart_cmd: "systemctl restart web-app"
+  log_path: "/var/log/web-app.log"
+  dependencies: []
+
+- id: "database"
+  name: "database"
+  host: "10.0.2.200"
+  port: 5432
+  ssh_user: "$(whoami)"
+  start_cmd: "systemctl start postgresql"
+  stop_cmd: "systemctl stop postgresql"
+  restart_cmd: "systemctl restart postgresql"
+  log_path: "/var/log/postgresql/postgresql.log"
+  dependencies: []

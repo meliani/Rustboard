@@ -1,0 +1,707 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rust Dashboard | Control Panel</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/htmx.org@1.9.2"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    :root {
+      --bg-color: #0d1117;
+      --panel-bg: rgba(22, 27, 34, 0.85);
+      --card-bg: #161b22;
+      --card-border: #30363d;
+      --text-main: #c9d1d9;
+      --text-dim: #8b949e;
+      --accent: #d35400; /* Rust-ish Orange */
+      --accent-hover: #e67e22;
+      --safe: #238636;
+      --danger: #da3633;
+      --info: #388bfd;
+      --warning: #d29922;
+      --sidebar-width: 260px;
+      --header-height: 64px;
+      --radius: 8px;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: 'Inter', sans-serif;
+      background-color: var(--bg-color);
+      background-image: 
+        radial-gradient(circle at 10% 20%, rgba(211, 84, 0, 0.05) 0%, transparent 40%),
+        radial-gradient(circle at 90% 80%, rgba(56, 139, 253, 0.05) 0%, transparent 40%);
+      color: var(--text-main);
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+    }
+
+    button {
+      cursor: pointer;
+      font-family: inherit;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      border-radius: var(--radius);
+      border: 1px solid var(--card-border);
+      background: var(--card-bg);
+      color: var(--text-main);
+      padding: 8px 12px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-weight: 500;
+      font-size: 13px;
+    }
+
+    button:hover {
+      background: #21262d;
+      border-color: #8b949e;
+      transform: translateY(-1px);
+    }
+
+    button:active { transform: translateY(0); }
+
+    button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+    button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+
+    button.icon-only { padding: 8px; border-radius: 50%; }
+
+    /* Layout */
+    .sidebar {
+      width: var(--sidebar-width);
+      background: var(--panel-bg);
+      border-right: 1px solid var(--card-border);
+      backdrop-filter: blur(12px);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      z-index: 100;
+    }
+
+    .sidebar-header {
+      padding: 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      border-bottom: 1px solid var(--card-border);
+    }
+
+    .logo-icon {
+      width: 32px;
+      height: 32px;
+      background: var(--accent);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      box-shadow: 0 0 20px rgba(211, 84, 0, 0.4);
+    }
+
+    .sidebar-logo-text { font-weight: 700; font-size: 18px; letter-spacing: -0.5px; }
+
+    .nav-list { padding: 16px; list-style: none; margin: 0; flex-grow: 1; }
+    .nav-item {
+      padding: 12px 16px;
+      border-radius: var(--radius);
+      margin-bottom: 4px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: var(--text-dim);
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+
+    .nav-item:hover { color: var(--text-main); background: rgba(255, 255, 255, 0.05); }
+    .nav-item.active { color: white; background: rgba(211, 84, 0, 0.1); border-left: 3px solid var(--accent); border-radius: 0 var(--radius) var(--radius) 0; margin-left: -16px; padding-left: 29px; }
+
+    .main-container { flex-grow: 1; display: flex; flex-direction: column; position: relative; overflow: auto; }
+
+    .top-bar {
+      height: var(--header-height);
+      padding: 0 32px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--card-border);
+      backdrop-filter: blur(8px);
+      position: sticky;
+      top: 0;
+      background: rgba(13, 17, 23, 0.8);
+      z-index: 90;
+    }
+
+    .content-area { padding: 32px; max-width: 1400px; width: 100%; margin: 0 auto; flex-grow: 1; display: none; }
+    .content-area.active { display: block; animation: fadeIn 0.3s ease-out; }
+
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* Service Grid */
+    .service-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+      gap: 20px;
+    }
+
+    .service-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 24px;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .service-card:hover { 
+      border-color: var(--accent); 
+      transform: translateY(-4px); 
+      box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+    }
+    
+    .service-card.status-running { border-left: 4px solid var(--safe); }
+    .service-card.status-stopped { border-left: 4px solid var(--danger); }
+    .service-card.status-error { border-left: 4px solid var(--warning); }
+
+    .service-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; }
+    .service-title { font-weight: 600; font-size: 18px; margin: 0; }
+    .service-id { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); background: rgba(255,255,255,0.05); padding: 2px 6px; border-radius: 4px; }
+
+    .status-badge {
+      font-size: 11px;
+      padding: 4px 8px;
+      border-radius: 20px;
+      text-transform: uppercase;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .status-running { background: rgba(35, 134, 54, 0.15); color: #3fb950; }
+    .status-stopped { background: rgba(218, 54, 51, 0.15); color: #f85149; }
+    .status-error { background: rgba(210, 153, 34, 0.15); color: #d29922; }
+    .status-unknown { background: rgba(139, 148, 158, 0.15); color: #8b949e; }
+
+    .service-info { margin-bottom: 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 13px; }
+    .info-item { display: flex; align-items: center; gap: 6px; color: var(--text-dim); }
+    .info-item i { width: 14px; height: 14px; }
+    .info-value { color: var(--text-main); font-weight: 500; }
+
+    .service-actions { display: flex; gap: 8px; flex-wrap: wrap; border-top: 1px solid var(--card-border); padding-top: 16px; }
+
+    /* Topology */
+    #topology-view { height: calc(100vh - var(--header-height) - 100px); }
+    #topology-container {
+      width: 100%;
+      height: 100%;
+      background: var(--card-bg);
+      border-radius: 12px;
+      border: 1px solid var(--card-border);
+      padding: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: auto;
+    }
+
+    /* Plugin Section */
+    .plugin-view { max-width: 900px; margin: 0 auto; }
+    .plugin-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 32px;
+    }
+    .plugin-control { margin-bottom: 24px; }
+    .plugin-label { display: block; margin-bottom: 8px; font-weight: 600; color: var(--text-dim); font-size: 14px; }
+    
+    select, textarea {
+      width: 100%;
+      background: #0d1117;
+      border: 1px solid var(--card-border);
+      color: var(--text-main);
+      padding: 12px;
+      border-radius: var(--radius);
+      font-family: 'JetBrains Mono', monospace;
+      outline: none;
+    }
+    select:focus, textarea:focus { border-color: var(--accent); }
+
+    .plugin-output-pane {
+      margin-top: 24px;
+      background: #010409;
+      padding: 20px;
+      border-radius: var(--radius);
+      border: 1px solid var(--card-border);
+      position: relative;
+    }
+    #plugin-output { margin: 0; font-size: 13px; line-height: 1.5; color: #7ee787; overflow: auto; max-height: 400px; }
+
+    /* Modal / Logs overlay */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.8);
+      backdrop-filter: blur(4px);
+      z-index: 1000;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 40px;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal-content {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      width: 100%;
+      max-width: 1000px;
+      max-height: 80vh;
+      border-radius: 16px;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+    }
+    .modal-header { padding: 20px 24px; border-bottom: 1px solid var(--card-border); display: flex; justify-content: space-between; align-items: center; }
+    .modal-body { flex-grow: 1; overflow: hidden; padding: 0; }
+    .terminal {
+      background: #000;
+      color: #fff;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      padding: 20px;
+      height: 100%;
+      overflow-y: auto;
+      line-height: 1.6;
+    }
+    .log-line { border-left: 2px solid #333; padding-left: 10px; margin-bottom: 4px; }
+    .log-line.error { border-left-color: var(--danger); color: #ffa3a3; }
+
+    /* Utils */
+    .pulse { animation: pulse 2s infinite; }
+    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 10px; }
+    ::-webkit-scrollbar-thumb:hover { background: #484f58; }
+  </style>
+</head>
+<body>
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="logo-icon"><i data-lucide="shield"></i></div>
+      <span class="sidebar-logo-text">RUST DASH</span>
+    </div>
+    <ul class="nav-list">
+      <li class="nav-item active" data-view="nodes"><i data-lucide="layout-grid"></i> Services</li>
+      <li class="nav-item" data-view="topology"><i data-lucide="git-merge"></i> Topology</li>
+      <li class="nav-item" data-view="plugins"><i data-lucide="zap"></i> Plugins</li>
+    </ul>
+    <div style="padding: 24px; border-top: 1px solid var(--card-border);">
+      <div id="connection-status" class="info-item">
+        <div style="width: 8px; height: 8px; background: var(--danger); border-radius: 50%;" id="status-dot"></div>
+        <span id="status-text">Disconnected</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main-container">
+    <header class="top-bar">
+      <div>
+        <h2 id="view-title" style="margin:0; font-size: 20px;">Service Dashboard</h2>
+        <span style="font-size: 12px; color: var(--text-dim);" id="view-subtitle">Monitor and control your LAN microservices</span>
+      </div>
+      <div style="display: flex; gap: 12px; align-items: center;">
+        <div style="position: relative; display: flex; align-items: center;">
+          <i data-lucide="search" style="position: absolute; left: 12px; width: 14px; color: var(--text-dim);"></i>
+          <input type="text" id="service-search" placeholder="Search services..." style="padding: 8px 12px 8px 34px; border-radius: var(--radius); border: 1px solid var(--card-border); background: var(--card-bg); color: var(--text-main); font-size: 13px; width: 220px;">
+        </div>
+        <select id="status-filter" style="width: auto; padding: 7px 12px; font-size: 13px; font-family: inherit;">
+          <option value="all">All Statuses</option>
+          <option value="running">Running</option>
+          <option value="stopped">Stopped</option>
+          <option value="error">Error</option>
+        </select>
+        <button id="reload-config" title="Reload YAML"><i data-lucide="refresh-cw"></i> Reload Config</button>
+        <div id="health-check" class="status-badge status-unknown">API: UNKNOWN</div>
+      </div>
+    </header>
+
+    <!-- Services View -->
+    <section id="view-nodes" class="content-area active">
+      <div class="service-grid" id="services-list">
+        <!-- Rendered by JS -->
+      </div>
+    </section>
+
+    <!-- Topology View -->
+    <section id="view-topology" class="content-area">
+      <div id="topology-view">
+        <div style="margin-bottom: 20px; display: flex; justify-content: flex-end;">
+          <button id="topology-refresh" class="primary"><i data-lucide="refresh-ccw"></i> Regenerate Graph</button>
+        </div>
+        <div id="topology-container">
+          <div id="topology-render"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Plugins View -->
+    <section id="view-plugins" class="content-area">
+      <div class="plugin-view">
+        <div class="plugin-card">
+          <div class="plugin-control">
+            <label class="plugin-label">Available Extension</label>
+            <select id="plugin-select"></select>
+          </div>
+          <div class="plugin-control">
+            <label class="plugin-label">Parameters (JSON)</label>
+            <textarea id="plugin-input" rows="5">{}</textarea>
+          </div>
+          <button id="plugin-run" class="primary" style="width: 100%; justify-content: center;"><i data-lucide="play-circle"></i> Execute Plugin</button>
+          
+          <div class="plugin-output-pane">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+              <span class="plugin-label" style="margin:0">Execution Result</span>
+              <button class="icon-only" onclick="document.getElementById('plugin-output').textContent=''"><i data-lucide="trash-2" style="width:14px"></i></button>
+            </div>
+            <pre id="plugin-output">Ready...</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Logs Modal -->
+  <div id="logs-modal" class="modal-overlay">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <h3 style="margin:0" id="log-service-name">Service Logs</h3>
+          <span id="log-service-host" style="font-size: 13px; color: var(--text-dim);"></span>
+        </div>
+        <button class="icon-only" id="close-logs"><i data-lucide="x"></i></button>
+      </div>
+      <div class="modal-body">
+        <div class="terminal" id="log-terminal">
+          <!-- Logs go here -->
+        </div>
+      </div>
+      <div style="padding: 12px 24px; background: rgba(0,0,0,0.2); border-top: 1px solid var(--card-border); display: flex; justify-content: space-between; color: var(--text-dim); font-size: 11px;">
+        <span>Streaming logs via SSH tail</span>
+        <span id="log-count">0 lines</span>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.2.3/dist/mermaid.min.js"></script>
+  <script>
+    // App State
+    let services = [];
+    let filteredServices = [];
+    let activeView = 'nodes';
+    let searchQuery = '';
+    let statusFilter = 'all';
+
+    // UI Elements
+    const views = document.querySelectorAll('.content-area');
+    const navItems = document.querySelectorAll('.nav-item');
+    const servicesList = document.getElementById('services-list');
+    const logsModal = document.getElementById('logs-modal');
+    const searchInput = document.getElementById('service-search');
+    const statusSelect = document.getElementById('status-filter');
+
+    // Filtering logic
+    function updateFilters() {
+      searchQuery = searchInput.value.toLowerCase();
+      statusFilter = statusSelect.value;
+      
+      filteredServices = services.filter(s => {
+        const matchesSearch = s.name.toLowerCase().includes(searchQuery) || s.id.toLowerCase().includes(searchQuery) || s.host.toLowerCase().includes(searchQuery);
+        const matchesStatus = statusFilter === 'all' || s.status.toLowerCase() === statusFilter;
+        return matchesSearch && matchesStatus;
+      });
+      
+      renderFilteredServices();
+    }
+
+    searchInput.addEventListener('input', updateFilters);
+    statusSelect.addEventListener('change', updateFilters);
+
+    function renderFilteredServices() {
+      servicesList.innerHTML = filteredServices.map(s => {
+        const statusClass = `status-${s.status.toLowerCase()}`;
+        return `
+          <div class="service-card ${statusClass}" data-id="${s.id}">
+            <div class="service-header">
+              <div>
+                <h3 class="service-title">${s.name}</h3>
+                <span class="service-id">${s.id}</span>
+              </div>
+              <div class="status-badge ${statusClass}">
+                <div style="width: 6px; height: 6px; background: currentColor; border-radius: 50%;"></div>
+                ${s.status}
+              </div>
+            </div>
+            <div class="service-info">
+              <div class="info-item"><i data-lucide="server"></i><span class="info-value">${s.host}</span></div>
+              <div class="info-item"><i data-lucide="hash"></i><span class="info-value">${s.port || 'N/A'}</span></div>
+              <div class="info-item"><i data-lucide="user"></i><span class="info-value">${s.ssh_user || 'root'}</span></div>
+              <div class="info-item"><i data-lucide="clock"></i><span class="info-value">Active</span></div>
+            </div>
+            <div class="service-actions">
+              <button class="primary" onclick="postCmd('${s.id}','start')"><i data-lucide="play" style="width:14px"></i> Start</button>
+              <button onclick="postCmd('${s.id}','restart')"><i data-lucide="rotate-ccw" style="width:14px"></i></button>
+              <button onclick="postCmd('${s.id}','stop')"><i data-lucide="square" style="width:14px"></i></button>
+              <button onclick="showLogs('${s.id}')"><i data-lucide="terminal" style="width:14px"></i> Logs</button>
+            </div>
+          </div>
+        `;
+      }).join('');
+      lucide.createIcons();
+    }
+
+    // Initialize Icons
+    lucide.createIcons();
+
+    // Navigation
+    navItems.forEach(item => {
+      item.addEventListener('click', () => {
+        const viewId = item.dataset.view;
+        switchView(viewId);
+      });
+    });
+
+    function switchView(viewId) {
+      activeView = viewId;
+      navItems.forEach(i => i.classList.remove('active'));
+      document.querySelector(`[data-view="${viewId}"]`).classList.add('active');
+      
+      views.forEach(v => v.classList.remove('active'));
+      document.getElementById(`view-${viewId}`).classList.add('active');
+      
+      const titleMap = {
+        'nodes': 'Service Dashboard',
+        'topology': 'Network Topology',
+        'plugins': 'System Extensions'
+      };
+      document.getElementById('view-title').textContent = titleMap[viewId];
+      
+      if(viewId === 'topology') refreshTopology();
+      if(viewId === 'plugins') loadPlugins();
+    }
+
+    // Commands
+    async function postCmd(id, cmd){
+      const btn = event?.currentTarget;
+      if(btn) {
+        const original = btn.innerHTML;
+        btn.innerHTML = '<i data-lucide="loader-2" class="pulse"></i>';
+        lucide.createIcons();
+      }
+
+      if(window.wsClient && window.wsClient.readyState === WebSocket.OPEN){
+        window.wsClient.send(JSON.stringify({type: 'cmd', id, cmd}));
+      } else {
+        await fetch('/services/cmd', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({id, cmd})
+        });
+      }
+    }
+
+    async function showLogs(id) {
+      const service = services.find(s => s.id === id);
+      if(!service) return;
+      
+      document.getElementById('log-service-name').textContent = `Logs: ${service.name}`;
+      document.getElementById('log-service-host').textContent = service.host;
+      const terminal = document.getElementById('log-terminal');
+      terminal.innerHTML = '<div class="log-line">Requesting logs from host...</div>';
+      logsModal.classList.add('active');
+      
+      try {
+        const res = await fetch('/services/logs', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({id, lines: 100})
+        });
+        const data = await res.json();
+        if(data.ok) {
+          const lines = data.logs.split('\n');
+          terminal.innerHTML = lines.map(l => `<div class="log-line">${l.replace(/</g, '&lt;')}</div>`).join('');
+          document.getElementById('log-count').textContent = `${lines.length} lines`;
+          terminal.scrollTop = terminal.scrollHeight;
+        } else {
+          terminal.innerHTML = `<div class="log-line error">Error: ${data.error}</div>`;
+        }
+      } catch(e) {
+        terminal.innerHTML = `<div class="log-line error">Failed to fetch logs: ${e}</div>`;
+      }
+    }
+
+    document.getElementById('close-logs').onclick = () => logsModal.classList.remove('active');
+
+    // Rendering
+    function renderServices(list) {
+      services = list;
+      updateFilters();
+    }
+
+    function updateService(s) {
+      const idx = services.findIndex(item => item.id === s.id);
+      if(idx !== -1) services[idx] = s;
+      else services.push(s);
+      updateFilters();
+    }
+
+    async function fetchServices() {
+      const r = await fetch('/services');
+      const j = await r.json();
+      renderServices(j.services || []);
+    }
+
+    // WebSocket
+    function initWS() {
+      const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
+      const ws = new WebSocket(proto + '://' + location.host + '/ws');
+      const dot = document.getElementById('status-dot');
+      const text = document.getElementById('status-text');
+
+      window.wsClient = ws;
+      
+      ws.onopen = () => {
+        dot.style.background = 'var(--safe)';
+        text.textContent = 'Live System Connected';
+      };
+      
+      ws.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if(data.type === 'full_state') renderServices(data.services || []);
+          else if(data.type === 'service_update') updateService(data.service);
+        } catch(err) { console.error('WS:', err); }
+      };
+
+      ws.onclose = () => {
+        dot.style.background = 'var(--danger)';
+        text.textContent = 'Disconnected - Retrying...';
+        setTimeout(initWS, 2000);
+      };
+    }
+
+    // Topology
+    async function refreshTopology() {
+      const container = document.getElementById('topology-render');
+      container.innerHTML = '<div class="pulse">Generating dependency graph...</div>';
+      
+      try {
+        const r = await fetch('/topology');
+        const j = await r.json();
+        const nodes = j.nodes || [];
+        const edges = j.edges || [];
+        
+        let graphDef = 'graph TD\n';
+        graphDef += '  classDef default fill:#161b22,stroke:#30363d,color:#c9d1d9,border-radius:8px;\n';
+        graphDef += '  classDef running fill:rgba(35, 134, 54, 0.1),stroke:#3fb950,color:#3fb950;\n';
+        
+        nodes.forEach(n => {
+          const s = services.find(x => x.id === n);
+          const className = s?.status === 'running' ? ':::running' : '';
+          graphDef += `  ${n}["<div style='padding:8px'><b>${s?.name || n}</b><br/><small>${n}</small></div>"]${className}\n`;
+        });
+        
+        edges.forEach(e => {
+          graphDef += `  ${e.from} --> ${e.to}\n`;
+        });
+
+        container.innerHTML = `<div class="mermaid">${graphDef}</div>`;
+        mermaid.init(undefined, container.querySelectorAll('.mermaid'));
+      } catch(e) {
+        container.innerHTML = `<div class="status-error">Failed to load topology: ${e}</div>`;
+      }
+    }
+
+    document.getElementById('topology-refresh').onclick = refreshTopology;
+
+    // Plugins
+    async function loadPlugins() {
+      const select = document.getElementById('plugin-select');
+      select.innerHTML = '<option>Loading...</option>';
+      try {
+        const r = await fetch('/plugins');
+        const j = await r.json();
+        const p = j.plugins || [];
+        select.innerHTML = p.map(name => `<option value="${name}">${name}</option>`).join('');
+      } catch(e) { select.innerHTML = '<option>Error loading extensions</option>'; }
+    }
+
+    document.getElementById('plugin-run').onclick = async () => {
+      const name = document.getElementById('plugin-select').value;
+      const input = document.getElementById('plugin-input').value;
+      const output = document.getElementById('plugin-output');
+      output.textContent = 'Executing...';
+      
+      try {
+        const res = await fetch('/plugins/exec', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name, input: JSON.parse(input)})
+        });
+        const out = await res.json();
+        output.textContent = JSON.stringify(out, null, 2);
+      } catch(e) { output.textContent = `Execution failed: ${e}`; }
+    };
+
+    // Global
+    document.getElementById('reload-config').onclick = async () => {
+      const res = await fetch('/config/reload', { method: 'POST' });
+      const data = await res.json();
+      if(data.ok) console.log('Config reloaded');
+    };
+
+    async function checkHealth() {
+      const el = document.getElementById('health-check');
+      try {
+        const r = await fetch('/health');
+        if(r.ok) {
+          el.className = 'status-badge status-running';
+          el.textContent = 'API: ONLINE';
+        } else {
+          el.className = 'status-badge status-error';
+          el.textContent = 'API: ERROR';
+        }
+      } catch(e) {
+        el.className = 'status-badge status-stopped';
+        el.textContent = 'API: OFFLINE';
+      }
+    }
+
+    // Startup
+    initWS();
+    fetchServices();
+    setInterval(checkHealth, 5000);
+    checkHealth();
+
+    // Support for HTMX triggers if needed
+    document.body.addEventListener('htmx:afterOnLoad', (evt) => {
+      if(evt.detail.xhr.responseURL.includes('/services')) {
+        const j = JSON.parse(evt.detail.xhr.responseText);
+        renderServices(j.services || []);
+      }
+    });
+
+  </script>
+</body>
+</html>

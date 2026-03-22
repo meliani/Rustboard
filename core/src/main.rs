@@ -1,0 +1,378 @@
+use std::sync::Arc;
+use std::path::PathBuf;
+use std::convert::Infallible;
+use axum::{routing::{get, post}, Router, Json, extract::Extension};
+use axum::response::sse::{Sse, Event};
+use axum::response::Html;
+use axum::extract::ws::{WebSocketUpgrade, Message, WebSocket};
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
+use futures::{SinkExt, StreamExt};
+use serde_json::Value;
+use serde_json::json;
+use tokio::sync::RwLock;
+mod service;
+mod ssh;
+mod health;
+mod config;
+mod plugin;
+use service::Service;
+
+struct AppState {
+    services: RwLock<Vec<Service>>,
+    broadcaster: broadcast::Sender<String>,
+}
+
+type SharedState = Arc<AppState>;
+
+async fn list_services(Extension(state): Extension<SharedState>) -> Json<serde_json::Value> {
+    let services = state.services.read().await;
+    Json(json!({ "services": &*services }))
+}
+
+// Perform a service command without holding the write lock during the SSH call.
+async fn perform_service_cmd(state: SharedState, id: String, action: String) -> serde_json::Value {
+    // collect necessary data and update status under lock
+    let (host, ssh_user, cmd_to_run) = {
+        let mut services = state.services.write().await;
+        if let Some(s) = services.iter_mut().find(|s| s.id == id) {
+            let maybe_cmd = match action.as_str() {
+                "start" => s.start_cmd.clone(),
+                "stop" => s.stop_cmd.clone(),
+                "restart" => s.restart_cmd.clone(),
+                other => Some(other.to_string()),
+            };
+            if maybe_cmd.is_none() {
+                return json!({"ok": false, "error": "no command configured"});
+            }
+            // optimistic status update
+            s.status = action.clone();
+            let s_clone = s.clone();
+            let _ = state.broadcaster.send(json!({"type": "service_update", "service": s_clone}).to_string());
+            (s.host.clone(), s.ssh_user.clone(), maybe_cmd.unwrap())
+        } else {
+            return json!({"ok": false, "error": "service not found"});
+        }
+    };
+
+    // run SSH outside the lock
+    match ssh::run_command(ssh_user.as_deref(), &host, &cmd_to_run).await {
+        Ok(out) => {
+            let mut services = state.services.write().await;
+            if let Some(s) = services.iter_mut().find(|s| s.id == id) {
+                s.status = action.clone();
+                let s_clone = s.clone();
+                let _ = state.broadcaster.send(json!({"type": "service_update", "service": s_clone}).to_string());
+            }
+            json!({"ok": true, "output": out})
+        }
+        Err(e) => {
+            let mut services = state.services.write().await;
+            if let Some(s) = services.iter_mut().find(|s| s.id == id) {
+                s.status = "error".to_string();
+                let s_clone = s.clone();
+                let _ = state.broadcaster.send(json!({"type": "service_update", "service": s_clone}).to_string());
+            }
+            json!({"ok": false, "error": format!("{}", e)})
+        }
+    }
+}
+
+async fn handle_ws(socket: WebSocket, state: SharedState) {
+    let (mut sender, mut receiver) = socket.split();
+    // subscribe to broadcast channel
+    let mut rx = state.broadcaster.subscribe();
+
+    // forward broadcasts to this websocket
+    let send_task = tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(msg) => {
+                    if sender.send(Message::Text(msg)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // read messages from client
+    while let Some(Ok(msg)) = receiver.next().await {
+        match msg {
+            Message::Text(t) => {
+                // expect JSON commands: {type: "cmd", id: "...", cmd: "start"}
+                if let Ok(v) = serde_json::from_str::<Value>(&t) {
+                    if v.get("type").and_then(|x| x.as_str()) == Some("cmd") {
+                        if let (Some(id), Some(cmd)) = (v.get("id").and_then(|x| x.as_str()), v.get("cmd").and_then(|x| x.as_str())) {
+                            let st = state.clone();
+                            let id = id.to_string();
+                            let cmd = cmd.to_string();
+                            // run command in background; updates will be broadcast
+                            tokio::spawn(async move { let _ = perform_service_cmd(st, id, cmd).await; });
+                        }
+                    }
+                }
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+
+    // stop send task
+    send_task.abort();
+}
+
+#[derive(serde::Deserialize)]
+struct CmdBody { id: String, cmd: String }
+
+#[derive(serde::Deserialize)]
+struct LogsReq { id: String, lines: Option<usize> }
+async fn health() -> &'static str { "ok" }
+
+// Note: handlers for commands/logs/reload are defined as closures in `main`
+// because using top-level functions with multiple extractors caused Handler
+// trait mismatches in some environments. Topology and list endpoints remain simple.
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt::init();
+
+    // Enforce running inside WSL on Windows hosts by default.
+    // If you intentionally want to run the binary natively on Windows, set the
+    // environment variable `ALLOW_WINDOWS=1` to bypass this guard.
+    if cfg!(target_os = "windows") {
+        if std::env::var_os("ALLOW_WINDOWS").is_none() {
+            eprintln!("Detected native Windows execution. This project targets Linux/WSL. Please run inside WSL.");
+            eprintln!("Use the helper script: scripts\\ensure-wsl.ps1 to invoke commands via WSL.");
+            eprintln!("Example (PowerShell): .\\scripts\\ensure-wsl.ps1 cargo run -p core -- config/services.example.yaml");
+            std::process::exit(1);
+        } else {
+            tracing::warn!("ALLOW_WINDOWS set; continuing on native Windows host.");
+        }
+    }
+    let config_path = std::env::args().nth(1).unwrap_or_else(|| "config/services.example.yaml".to_string());
+    let initial_services = match config::load_services_from_file(&config_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("Failed to load config {}: {}", config_path, e);
+            Vec::new()
+        }
+    };
+    // broadcast channel for server-sent events
+    let (bcast_tx, _bcast_rx) = broadcast::channel::<String>(64);
+    let state: SharedState = Arc::new(AppState { services: RwLock::new(initial_services), broadcaster: bcast_tx.clone() });
+
+    // Background health check worker
+    let health_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            let service_ids: Vec<String> = {
+                let s = health_state.services.read().await;
+                s.iter().map(|s| s.id.clone()).collect()
+            };
+            
+            for id in service_ids {
+                let service_clone = {
+                    let s = health_state.services.read().await;
+                    s.iter().find(|x| x.id == id).cloned()
+                };
+                
+                if let Some(mut s) = service_clone {
+                    // Skip checking if it's currently being "updated" via command (optional optimization)
+                    let is_healthy = health::check_service(&s).await;
+                    let new_status = if is_healthy { "running".to_string() } else { "stopped".to_string() };
+                    
+                    if s.status != new_status {
+                        let mut services = health_state.services.write().await;
+                        if let Some(target) = services.iter_mut().find(|x| x.id == id) {
+                            target.status = new_status.clone();
+                            s.status = new_status;
+                            let _ = health_state.broadcaster.send(json!({"type": "service_update", "service": s}).to_string());
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Plugin directory (can be overridden with PLUGIN_DIR env var)
+    let plugin_dir: PathBuf = std::env::var("PLUGIN_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("plugins"));
+
+    // Create routes as closures that capture `state` to avoid Handler trait issues
+    let state_for_cmd = state.clone();
+    let cmd_route = post(move |req: axum::http::Request<axum::body::Body>| {
+        let state = state_for_cmd.clone();
+        async move {
+            let bytes = match hyper::body::to_bytes(req.into_body()).await {
+                Ok(b) => b,
+                Err(_) => return axum::Json(json!({"ok": false, "error": "failed to read body"})),
+            };
+            let body: CmdBody = match serde_json::from_slice(&bytes) {
+                Ok(b) => b,
+                Err(_) => return axum::Json(json!({"ok": false, "error": "invalid json"})),
+            };
+            let res = perform_service_cmd(state, body.id.clone(), body.cmd.clone()).await;
+            axum::Json(res)
+        }
+    });
+
+    let state_for_logs = state.clone();
+    let logs_route = post(move |req: axum::http::Request<axum::body::Body>| {
+        let state = state_for_logs.clone();
+        async move {
+            let bytes = match hyper::body::to_bytes(req.into_body()).await {
+                Ok(b) => b,
+                Err(_) => return axum::Json(json!({"ok": false, "error": "failed to read body"})),
+            };
+            let body: LogsReq = match serde_json::from_slice(&bytes) {
+                Ok(b) => b,
+                Err(_) => return axum::Json(json!({"ok": false, "error": "invalid json"})),
+            };
+            let services = state.services.read().await;
+            if let Some(s) = services.iter().find(|s| s.id == body.id) {
+                let lines = body.lines.unwrap_or(200);
+                if let Some(cmd) = &s.log_cmd {
+                    // Use custom log command. We might want to append `| tail -n <lines>` if not already there or just use it.
+                    // For safety, we wrap the command and tail the output.
+                    let full_cmd = format!("{} | tail -n {}", cmd, lines);
+                    match ssh::run_command(s.ssh_user.as_deref(), &s.host, &full_cmd).await {
+                        Ok(out) => return axum::Json(json!({"ok": true, "logs": out})),
+                        Err(e) => return axum::Json(json!({"ok": false, "error": format!("{}", e)})),
+                    }
+                } else if let Some(path) = &s.log_path {
+                    match ssh::tail_file(s.ssh_user.as_deref(), &s.host, path, lines).await {
+                        Ok(out) => return axum::Json(json!({"ok": true, "logs": out})),
+                        Err(e) => return axum::Json(json!({"ok": false, "error": format!("{}", e)})),
+                    }
+                } else {
+                    return axum::Json(json!({"ok": false, "error": "no logs configured"}));
+                }
+            }
+            axum::Json(json!({"ok": false, "error": "service not found"}))
+        }
+    });
+
+    let state_for_reload = state.clone();
+    let reload_route = post(move |_req: axum::http::Request<axum::body::Body>| {
+        let state = state_for_reload.clone();
+        async move {
+            let config_path = std::env::args().nth(1).unwrap_or_else(|| "config/services.example.yaml".to_string());
+            match config::load_services_from_file(&config_path) {
+                Ok(new) => {
+                    let mut s = state.services.write().await;
+                    *s = new;
+                    // broadcast full state
+                    let snapshot = json!({"type": "full_state", "services": &*s}).to_string();
+                    let _ = state.broadcaster.send(snapshot);
+                    return axum::Json(json!({"ok": true}));
+                }
+                Err(e) => return axum::Json(json!({"ok": false, "error": format!("{}", e)})),
+            }
+        }
+    });
+
+    let state_for_topo = state.clone();
+    let topo_route = get(move || {
+        let state = state_for_topo.clone();
+        async move {
+            let services = state.services.read().await;
+            let nodes: Vec<_> = services.iter().map(|s| s.id.clone()).collect();
+            let edges: Vec<_> = services.iter().flat_map(|s| {
+                s.dependencies.iter().map(move |d| json!({"from": s.id, "to": d}))
+            }).collect();
+            axum::Json(json!({"nodes": nodes, "edges": edges}))
+        }
+    });
+
+    // SSE events endpoint
+    let events_state = state.clone();
+    let events_route = get(move || {
+        let state = events_state.clone();
+        async move {
+            // initial snapshot
+            let init = {
+                let services = state.services.read().await;
+                serde_json::to_string(&json!({"type": "full_state", "services": &*services})).unwrap_or_else(|_| "{}".to_string())
+            };
+
+            // subscriber stream
+            let rx = state.broadcaster.subscribe();
+            let bs = BroadcastStream::new(rx).filter_map(|res| async move {
+                match res {
+                    Ok(s) => Some(Ok::<axum::response::sse::Event, Infallible>(Event::default().data(s))),
+                    Err(_) => None,
+                }
+            });
+
+            let init_stream = tokio_stream::once(Ok(Event::default().data(init)));
+            let stream = init_stream.chain(bs);
+            Sse::new(stream)
+        }
+    });
+
+    // WebSocket endpoint (bidirectional)
+    let ws_state = state.clone();
+    let ws_route = get(move |ws: WebSocketUpgrade| {
+        let state = ws_state.clone();
+        async move { ws.on_upgrade(move |socket| handle_ws(socket, state)) }
+    });
+
+    // Plugin routes: list available plugins, execute a plugin
+    let plugin_dir_for_list = plugin_dir.clone();
+    let plugins_route = get(move || {
+        let plugin_dir = plugin_dir_for_list.clone();
+        async move {
+            match plugin::list_plugins_in(&plugin_dir) {
+                Ok(list) => axum::Json(json!({"ok": true, "plugins": list})),
+                Err(e) => axum::Json(json!({"ok": false, "error": format!("{}", e)})),
+            }
+        }
+    });
+
+    #[derive(serde::Deserialize)]
+    struct PluginExec { name: String, input: Option<serde_json::Value> }
+    let plugin_dir_for_exec = plugin_dir.clone();
+    let plugins_exec_route = post(move |req: axum::http::Request<axum::body::Body>| {
+        let plugin_dir = plugin_dir_for_exec.clone();
+        async move {
+            let bytes = match hyper::body::to_bytes(req.into_body()).await {
+                Ok(b) => b,
+                Err(_) => return axum::Json(json!({"ok": false, "error": "failed to read body"})),
+            };
+            let body: PluginExec = match serde_json::from_slice(&bytes) {
+                Ok(b) => b,
+                Err(_) => return axum::Json(json!({"ok": false, "error": "invalid json"})),
+            };
+            let plugin_path = plugin_dir.join(&body.name);
+            if !plugin_path.exists() {
+                return axum::Json(json!({"ok": false, "error": "plugin not found"}));
+            }
+            let input_str = body.input.map(|v| v.to_string()).unwrap_or_default();
+            match plugin::exec_plugin(&plugin_path, &input_str).await {
+                Ok(out) => axum::Json(json!({"ok": true, "output": out})),
+                Err(e) => axum::Json(json!({"ok": false, "error": format!("{}", e)})),
+            }
+        }
+    });
+
+    let app = Router::new()
+        .route("/", get(|| async { Html(include_str!("../web/index.html")) }))
+        .route("/services", get(list_services))
+        .route("/events", events_route)
+        .route("/ws", ws_route)
+        .route("/services/cmd", cmd_route)
+        .route("/services/logs", logs_route)
+        .route("/config/reload", reload_route)
+        .route("/plugins", plugins_route)
+        .route("/plugins/exec", plugins_exec_route)
+        .route("/topology", topo_route)
+        .route("/health", get(health))
+        .layer(Extension(state));
+    let addr = std::net::SocketAddr::from(([127,0,0,1], 8080));
+    tracing::info!("Listening on {}", addr);
+    axum::Server::bind(&addr).serve(app.into_make_service()).await?;
+    Ok(())
+}
