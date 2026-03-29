@@ -27,6 +27,27 @@ pub struct Service {
     pub dependencies: Vec<String>,
     #[serde(default = "default_status")]
     pub status: String,
+
+    // --- Grouping & metadata ---
+    /// Free-form tags for grouping (e.g. ["web", "nginx", "proxy"])
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Logical stacks / project names — a service can belong to many (e.g. ["glao", "monitoring"])
+    #[serde(default)]
+    pub stacks: Vec<String>,
+
+    // --- Container details (optional, informational) ---
+    #[serde(default)]
+    pub container_name: Option<String>,
+    #[serde(default)]
+    pub container_id: Option<String>,
+    #[serde(default)]
+    pub image: Option<String>,
+
+    // --- Discovery marker ---
+    /// true = this service was auto-discovered via Docker, not from YAML
+    #[serde(default)]
+    pub discovered: bool,
 }
 
 fn default_status() -> String {

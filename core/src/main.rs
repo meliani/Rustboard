@@ -16,6 +16,7 @@ mod ssh;
 mod health;
 mod config;
 mod plugin;
+mod discover;
 use service::Service;
 
 struct AppState {
@@ -402,6 +403,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // --- Discovery routes ---
+    #[derive(serde::Deserialize)]
+    struct DiscoverReq { host: String, ssh_user: Option<String> }
+
+    let state_for_discover = state.clone();
+    let discover_route = post(move |req: axum::http::Request<axum::body::Body>| {
+        let state = state_for_discover.clone();
+        async move {
+            let bytes = match hyper::body::to_bytes(req.into_body()).await {
+                Ok(b) => b,
+                Err(_) => return axum::Json(json!({"ok": false, "error": "failed to read body"})),
+            };
+            let body: DiscoverReq = match serde_json::from_slice(&bytes) {
+                Ok(b) => b,
+                Err(_) => return axum::Json(json!({"ok": false, "error": "invalid json — expected {host, ssh_user}"})),
+            };
+
+            // Collect existing service ids so we don't duplicate
+            let existing_ids: std::collections::HashSet<String> = {
+                let s = state.services.read().await;
+                s.iter().map(|x| x.id.clone()).collect()
+            };
+
+            match discover::discover_docker_services(
+                &body.host,
+                body.ssh_user.as_deref(),
+                &existing_ids,
+            ).await {
+                Ok(new_services) => {
+                    let count = new_services.len();
+                    // Merge into state
+                    {
+                        let mut s = state.services.write().await;
+                        s.extend(new_services.clone());
+                    }
+                    // Broadcast updated full state
+                    {
+                        let s = state.services.read().await;
+                        let snapshot = json!({"type": "full_state", "services": &*s}).to_string();
+                        let _ = state.broadcaster.send(snapshot);
+                    }
+                    axum::Json(json!({"ok": true, "discovered": count, "services": new_services}))
+                }
+                Err(e) => axum::Json(json!({"ok": false, "error": format!("{}", e)})),
+            }
+        }
+    });
+
+    let state_for_hosts = state.clone();
+    let discover_hosts_route = get(move || {
+        let state = state_for_hosts.clone();
+        async move {
+            let s = state.services.read().await;
+            // Unique hosts with count
+            let mut map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            for svc in s.iter() {
+                *map.entry(svc.host.clone()).or_insert(0) += 1;
+            }
+            let hosts: Vec<_> = map.into_iter().map(|(h, c)| json!({"host": h, "service_count": c})).collect();
+            axum::Json(json!({"ok": true, "hosts": hosts}))
+        }
+    });
+
     let app = Router::new()
         .route("/", get(|| async { Html(include_str!("../web/index.html")) }))
         .route("/services", get(list_services))
@@ -414,6 +478,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/plugins", plugins_route)
         .route("/plugins/exec", plugins_exec_route)
         .route("/topology", topo_route)
+        .route("/discover", discover_route)
+        .route("/discover/hosts", discover_hosts_route)
         .route("/health", get(health))
         .layer(Extension(state));
     let addr = std::net::SocketAddr::from(([127,0,0,1], 8080));
