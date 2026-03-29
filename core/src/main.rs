@@ -20,6 +20,7 @@ use service::Service;
 
 struct AppState {
     services: RwLock<Vec<Service>>,
+    preferences: RwLock<config::Preferences>,
     broadcaster: broadcast::Sender<String>,
 }
 
@@ -159,9 +160,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Vec::new()
         }
     };
+    let pref_path = "config/preferences.yaml";
+    let initial_prefs = match config::load_preferences_from_file(pref_path) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Failed to load prefs {}: {}. Using defaults.", pref_path, e);
+            config::Preferences { show_tooltips: true, theme: "dark".to_string() }
+        }
+    };
     // broadcast channel for server-sent events
     let (bcast_tx, _bcast_rx) = broadcast::channel::<String>(64);
-    let state: SharedState = Arc::new(AppState { services: RwLock::new(initial_services), broadcaster: bcast_tx.clone() });
+    let state: SharedState = Arc::new(AppState { 
+        services: RwLock::new(initial_services), 
+        preferences: RwLock::new(initial_prefs),
+        broadcaster: bcast_tx.clone() 
+    });
 
     // Background health check worker
     let health_state = state.clone();
@@ -237,7 +250,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(cmd) = &s.log_cmd {
                     // Use custom log command. We might want to append `| tail -n <lines>` if not already there or just use it.
                     // For safety, we wrap the command and tail the output.
-                    let full_cmd = format!("{} | tail -n {}", cmd, lines);
+                    let full_cmd = format!("{} 2>&1 | tail -n {}", cmd, lines);
                     match ssh::run_command(s.ssh_user.as_deref(), &s.host, &full_cmd).await {
                         Ok(out) => return axum::Json(json!({"ok": true, "logs": out})),
                         Err(e) => return axum::Json(json!({"ok": false, "error": format!("{}", e)})),
@@ -260,17 +273,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = state_for_reload.clone();
         async move {
             let config_path = std::env::args().nth(1).unwrap_or_else(|| "config/services.example.yaml".to_string());
+            let mut ok = true;
+            let mut error = String::new();
+            
+            // Reload services
             match config::load_services_from_file(&config_path) {
                 Ok(new) => {
                     let mut s = state.services.write().await;
                     *s = new;
-                    // broadcast full state
-                    let snapshot = json!({"type": "full_state", "services": &*s}).to_string();
-                    let _ = state.broadcaster.send(snapshot);
-                    return axum::Json(json!({"ok": true}));
                 }
-                Err(e) => return axum::Json(json!({"ok": false, "error": format!("{}", e)})),
+                Err(e) => { ok = false; error = format!("services: {}", e); }
             }
+            
+            // Reload preferences
+            let pref_path = "config/preferences.yaml";
+            match config::load_preferences_from_file(pref_path) {
+                Ok(new) => {
+                    let mut p = state.preferences.write().await;
+                    *p = new;
+                }
+                Err(e) => { 
+                    if ok { ok = false; error = format!("prefs: {}", e); }
+                    else { error = format!("{}; prefs: {}", error, e); }
+                }
+            }
+
+            if ok {
+                let services = state.services.read().await;
+                // broadcast full state
+                let snapshot = json!({"type": "full_state", "services": &*services}).to_string();
+                let _ = state.broadcaster.send(snapshot);
+                return axum::Json(json!({"ok": true}));
+            }
+            axum::Json(json!({"ok": false, "error": error}))
+        }
+    });
+
+    let state_for_prefs = state.clone();
+    let prefs_route = get(move || {
+        let state = state_for_prefs.clone();
+        async move {
+            let p = state.preferences.read().await;
+            axum::Json(json!(&*p))
         }
     });
 
@@ -366,6 +410,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/services/cmd", cmd_route)
         .route("/services/logs", logs_route)
         .route("/config/reload", reload_route)
+        .route("/preferences", prefs_route)
         .route("/plugins", plugins_route)
         .route("/plugins/exec", plugins_exec_route)
         .route("/topology", topo_route)

@@ -20,6 +20,8 @@ pub struct Service {
     #[serde(default)]
     pub log_cmd: Option<String>,
     #[serde(default)]
+    pub health_cmd: Option<String>,
+    #[serde(default)]
     pub health_path: Option<String>,
     #[serde(default)]
     pub dependencies: Vec<String>,

@@ -290,6 +290,37 @@
     .pulse { animation: pulse 2s infinite; }
     @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
 
+    /* Tooltips */
+    [data-tooltip] { position: relative; }
+    [data-tooltip]::before {
+      content: attr(data-tooltip);
+      position: absolute;
+      bottom: 125%;
+      left: 50%;
+      transform: translateX(-50%) translateY(10px);
+      background: #1f242c;
+      color: white;
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 11px;
+      white-space: nowrap;
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+      border: 1px solid var(--card-border);
+      pointer-events: none;
+      z-index: 1000;
+    }
+
+    [data-tooltip]:hover::before {
+      opacity: 1;
+      visibility: visible;
+      transform: translateX(-50%) translateY(0);
+    }
+    
+    body.no-tooltips [data-tooltip]::before { display: none !important; }
+
     ::-webkit-scrollbar { width: 8px; height: 8px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 10px; }
@@ -304,9 +335,9 @@
       <span class="sidebar-logo-text">RUST DASH</span>
     </div>
     <ul class="nav-list">
-      <li class="nav-item active" data-view="nodes"><i data-lucide="layout-grid"></i> Services</li>
-      <li class="nav-item" data-view="topology"><i data-lucide="git-merge"></i> Topology</li>
-      <li class="nav-item" data-view="plugins"><i data-lucide="zap"></i> Plugins</li>
+      <li class="nav-item active" data-view="nodes" data-tooltip="View and manage all services"><i data-lucide="layout-grid"></i> Services</li>
+      <li class="nav-item" data-view="topology" data-tooltip="Visualize service dependencies"><i data-lucide="git-merge"></i> Topology</li>
+      <li class="nav-item" data-view="plugins" data-tooltip="Run custom system extensions"><i data-lucide="zap"></i> Plugins</li>
     </ul>
     <div style="padding: 24px; border-top: 1px solid var(--card-border);">
       <div id="connection-status" class="info-item">
@@ -334,7 +365,7 @@
           <option value="stopped">Stopped</option>
           <option value="error">Error</option>
         </select>
-        <button id="reload-config" title="Reload YAML"><i data-lucide="refresh-cw"></i> Reload Config</button>
+        <button id="reload-config" title="Reload YAML" data-tooltip="Refresh configuration from disk"><i data-lucide="refresh-cw"></i> Reload Config</button>
         <div id="health-check" class="status-badge status-unknown">API: UNKNOWN</div>
       </div>
     </header>
@@ -411,6 +442,7 @@
     // App State
     let services = [];
     let filteredServices = [];
+    let preferences = { show_tooltips: true };
     let activeView = 'nodes';
     let searchQuery = '';
     let statusFilter = 'all';
@@ -462,10 +494,18 @@
               <div class="info-item"><i data-lucide="clock"></i><span class="info-value">Active</span></div>
             </div>
             <div class="service-actions">
-              <button class="primary" onclick="postCmd('${s.id}','start')"><i data-lucide="play" style="width:14px"></i> Start</button>
-              <button onclick="postCmd('${s.id}','restart')"><i data-lucide="rotate-ccw" style="width:14px"></i></button>
-              <button onclick="postCmd('${s.id}','stop')"><i data-lucide="square" style="width:14px"></i></button>
-              <button onclick="showLogs('${s.id}')"><i data-lucide="terminal" style="width:14px"></i> Logs</button>
+              <button class="primary" onclick="postCmd('${s.id}','start')" data-tooltip="Start this service">
+                <i data-lucide="play" style="width:14px"></i> Start
+              </button>
+              <button onclick="postCmd('${s.id}','restart')" data-tooltip="Restart this service">
+                <i data-lucide="rotate-ccw" style="width:14px"></i>
+              </button>
+              <button onclick="postCmd('${s.id}','stop')" data-tooltip="Stop this service">
+                <i data-lucide="square" style="width:14px"></i>
+              </button>
+              <button onclick="showLogs('${s.id}')" data-tooltip="View remote logs">
+                <i data-lucide="terminal" style="width:14px"></i> Logs
+              </button>
             </div>
           </div>
         `;
@@ -634,6 +674,7 @@
     }
 
     document.getElementById('topology-refresh').onclick = refreshTopology;
+    document.getElementById('topology-refresh').setAttribute('data-tooltip', 'Redraw dependency graph');
 
     // Plugins
     async function loadPlugins() {
@@ -648,6 +689,7 @@
     }
 
     document.getElementById('plugin-run').onclick = async () => {
+    document.getElementById('plugin-run').setAttribute('data-tooltip', 'Execute selected plugin');
       const name = document.getElementById('plugin-select').value;
       const input = document.getElementById('plugin-input').value;
       const output = document.getElementById('plugin-output');
@@ -688,9 +730,22 @@
       }
     }
 
+    async function fetchPreferences() {
+      try {
+        const r = await fetch('/preferences');
+        preferences = await r.json();
+        if(!preferences.show_tooltips) {
+          document.body.classList.add('no-tooltips');
+        } else {
+          document.body.classList.remove('no-tooltips');
+        }
+      } catch(e) { console.error('Failed to fetch prefs', e); }
+    }
+
     // Startup
     initWS();
     fetchServices();
+    fetchPreferences();
     setInterval(checkHealth, 5000);
     checkHealth();
 
