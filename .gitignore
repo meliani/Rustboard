@@ -4,6 +4,8 @@ target/
 /web/target/
 /plugins/target/
 **/*.rs.bk
+config/services.yaml
+config/preferences.yaml
 .DS_Store
 *.log
 node_modules/
