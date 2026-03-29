@@ -483,7 +483,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(health))
         .layer(Extension(state));
     let addr = std::net::SocketAddr::from(([127,0,0,1], 8080));
-    tracing::info!("Listening on {}", addr);
+    tracing::info!("RUSH (Rust Dash) listening on {}", addr);
     axum::Server::bind(&addr).serve(app.into_make_service()).await?;
     Ok(())
 }

@@ -1,6 +1,8 @@
-# Rust Microservices Dashboard
+# RUSH (Rust Dash)
 
-Lightweight Rust-based local LAN microservices dashboard (CLI + web). This repository contains an initial scaffold: `core` (HTTP API + service manager), `cli` (command-line client), `web` (static assets), and `plugins` (plugin trait).
+Lightweight Rust-based local LAN microservices dashboard (CLI + web). **RUSH** is an open-source contribution from **International Micro Services (IMS)** to the developer community.
+
+This repository contains:
 
 Quick start:
 
