@@ -9,3 +9,4 @@ config/preferences.yaml
 .DS_Store
 *.log
 node_modules/
+*.exe
