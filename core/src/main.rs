@@ -140,19 +140,6 @@ async fn health() -> &'static str { "ok" }
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    // Enforce running inside WSL on Windows hosts by default.
-    // If you intentionally want to run the binary natively on Windows, set the
-    // environment variable `ALLOW_WINDOWS=1` to bypass this guard.
-    if cfg!(target_os = "windows") {
-        if std::env::var_os("ALLOW_WINDOWS").is_none() {
-            eprintln!("Detected native Windows execution. This project targets Linux/WSL. Please run inside WSL.");
-            eprintln!("Use the helper script: scripts\\ensure-wsl.ps1 to invoke commands via WSL.");
-            eprintln!("Example (PowerShell): .\\scripts\\ensure-wsl.ps1 cargo run -p core -- config/services.example.yaml");
-            std::process::exit(1);
-        } else {
-            tracing::warn!("ALLOW_WINDOWS set; continuing on native Windows host.");
-        }
-    }
     let config_path = std::env::args().nth(1).unwrap_or_else(|| "config/services.example.yaml".to_string());
     let initial_services = match config::load_services_from_file(&config_path) {
         Ok(s) => s,

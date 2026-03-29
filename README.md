@@ -6,6 +6,35 @@ This repository contains:
 
 Quick start:
 
+### Building a Local Executable
+
+1. Generate direct native binaries using the build scripts:
+
+**On Windows (PowerShell):**
+```powershell
+.\scripts\build-local.ps1
+```
+
+**On Linux/WSL (Bash):**
+```bash
+sh ./scripts/build-local.sh
+```
+
+2. Execute the app directly from the generated binaries:
+
+```powershell
+# Start the core dashboard server
+.\rush-core.exe config\services.example.yaml
+
+# Manage using the CLI
+.\rush-cli.exe list
+```
+*(Note: Omit `.exe` on Linux/WSL)*
+
+---
+
+### Running via Cargo (Development)
+
 1. Build the workspace:
 
 ```powershell
