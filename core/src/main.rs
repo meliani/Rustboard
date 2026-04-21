@@ -365,6 +365,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     #[derive(serde::Deserialize)]
+    struct QuickExecReq { id: String, quick: String }
+    let state_for_quick = state.clone();
+    let quick_exec_route = post(move |req: axum::http::Request<axum::body::Body>| {
+        let state = state_for_quick.clone();
+        async move {
+            let bytes = match hyper::body::to_bytes(req.into_body()).await {
+                Ok(b) => b,
+                Err(_) => return axum::Json(json!({"ok": false, "error": "failed to read body"})),
+            };
+            let body: QuickExecReq = match serde_json::from_slice(&bytes) {
+                Ok(b) => b,
+                Err(_) => return axum::Json(json!({"ok": false, "error": "invalid json — expected {id, quick}"})),
+            };
+
+            // Resolve service and quick command by cloning required fields while holding the lock
+            let (ssh_user_opt, host_clone, cmd_to_run) = {
+                let services = state.services.read().await;
+                if let Some(s) = services.iter().find(|s| s.id == body.id) {
+                    if let Some(qc) = s.quick_commands.iter().find(|q| q.name == body.quick) {
+                        let in_container = qc.in_container.unwrap_or(true);
+                        let cmd = if in_container {
+                            if let Some(cname) = &s.container_name {
+                                format!("docker exec -it {} {}", cname, qc.cmd)
+                            } else {
+                                qc.cmd.clone()
+                            }
+                        } else {
+                            qc.cmd.clone()
+                        };
+                        (s.ssh_user.clone(), s.host.clone(), cmd)
+                    } else {
+                        return axum::Json(json!({"ok": false, "error": "quick command not found"}));
+                    }
+                } else {
+                    return axum::Json(json!({"ok": false, "error": "service not found"}));
+                }
+            };
+
+            // Run command via SSH (lock released)
+            match ssh::run_command(ssh_user_opt.as_deref(), &host_clone, &cmd_to_run).await {
+                Ok(out) => return axum::Json(json!({"ok": true, "output": out})),
+                Err(e) => return axum::Json(json!({"ok": false, "error": format!("{}", e)})),
+            }
+        }
+    });
+
+    #[derive(serde::Deserialize)]
     struct PluginExec { name: String, input: Option<serde_json::Value> }
     let plugin_dir_for_exec = plugin_dir.clone();
     let plugins_exec_route = post(move |req: axum::http::Request<axum::body::Body>| {
@@ -459,6 +506,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/events", events_route)
         .route("/ws", ws_route)
         .route("/services/cmd", cmd_route)
+        .route("/services/quick", quick_exec_route)
         .route("/services/logs", logs_route)
         .route("/config/reload", reload_route)
         .route("/preferences", prefs_route)

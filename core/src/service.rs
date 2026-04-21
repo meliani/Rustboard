@@ -48,8 +48,27 @@ pub struct Service {
     /// true = this service was auto-discovered via Docker, not from YAML
     #[serde(default)]
     pub discovered: bool,
+
+    // --- Quick commands that can be executed for this service (e.g. shell, migrations)
+    #[serde(default)]
+    pub quick_commands: Vec<QuickCommand>,
+
+    // Predicted application path inside the container or host (if discovered)
+    #[serde(default)]
+    pub predicted_app_path: Option<String>,
 }
 
 fn default_status() -> String {
     "unknown".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuickCommand {
+    pub name: String,
+    pub cmd: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// If true, server will prefer to run this inside the container using `docker exec`
+    #[serde(default)]
+    pub in_container: Option<bool>,
 }

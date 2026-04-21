@@ -1,4 +1,4 @@
-use crate::service::Service;
+use crate::service::{Service, QuickCommand};
 use anyhow::Result;
 use serde::Deserialize;
 
@@ -98,6 +98,47 @@ pub async fn discover_docker_services(
         let stop_cmd = format!("docker stop {}", container_name);
         let restart_cmd = format!("docker restart {}", container_name);
         let health_cmd = format!("docker inspect --format '{{{{.State.Status}}}}' {}", container_name);
+        // Attempt to inspect container to guess working dir / mounts
+        let mut predicted_app_path: Option<String> = None;
+        // Inspect WorkingDir
+        let inspect_wd_cmd = format!("docker inspect --format '{{{{json .Config.WorkingDir}}}}' {}", container_name);
+        if let Ok(wd_raw) = crate::ssh::run_command(ssh_user, host, &inspect_wd_cmd).await {
+            if let Ok(pwd) = serde_json::from_str::<Option<String>>(&wd_raw) {
+                if let Some(p) = pwd {
+                    if !p.is_empty() {
+                        predicted_app_path = Some(p);
+                    }
+                }
+            }
+        }
+
+        // Inspect mounts to see if any destination looks like an app folder (e.g. contains "app" or "www")
+        if predicted_app_path.is_none() {
+            let inspect_mounts_cmd = format!("docker inspect --format '{{{{json .Mounts}}}}' {}", container_name);
+            if let Ok(m_raw) = crate::ssh::run_command(ssh_user, host, &inspect_mounts_cmd).await {
+                if let Ok(mv) = serde_json::from_str::<serde_json::Value>(&m_raw) {
+                    if let Some(arr) = mv.as_array() {
+                        for m in arr {
+                            if let Some(dest) = m.get("Destination").and_then(|d| d.as_str()) {
+                                let ds = dest.to_lowercase();
+                                if ds.contains("/app") || ds.contains("/www") || ds.contains("/srv") || ds.contains("/usr/src") {
+                                    predicted_app_path = Some(dest.to_string());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Prepare sensible default quick commands
+        let mut quicks: Vec<QuickCommand> = Vec::new();
+        // Interactive shell: prefer bash, fallback to sh when executed via `sh -lc 'bash -l || sh'`
+        quicks.push(QuickCommand { name: "shell".to_string(), cmd: "sh -lc 'bash -l || sh'".to_string(), description: Some("Interactive shell inside container".to_string()), in_container: Some(true) });
+        // ls of predicted app path (or root)
+        let list_path = predicted_app_path.clone().unwrap_or_else(|| "/".to_string());
+        quicks.push(QuickCommand { name: "ls_app".to_string(), cmd: format!("sh -lc 'ls -la {} || ls -la /'", list_path), description: Some("List application folder inside container".to_string()), in_container: Some(true) });
 
         discovered.push(Service {
             id,
@@ -120,6 +161,8 @@ pub async fn discover_docker_services(
             container_id: if short_id.is_empty() { None } else { Some(short_id) },
             image: if image.is_empty() { None } else { Some(image) },
             discovered: true,
+            quick_commands: quicks,
+            predicted_app_path,
         });
     }
 

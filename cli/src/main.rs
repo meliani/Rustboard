@@ -16,6 +16,10 @@ enum Commands {
     List,
     /// Show status for a service
     Status { id: String },
+    /// List stored quick commands for a service
+    QuickList { id: String },
+    /// Execute a stored quick command for a service
+    QuickExec { id: String, quick: String },
     /// Start a service
     Start { id: String },
     /// Stop a service
@@ -49,6 +53,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(s) = list.services.into_iter().find(|v| v.get("id").and_then(|x| x.as_str()) == Some(&id)) {
                 println!("{}", serde_json::to_string_pretty(&s)?);
             } else { println!("service not found"); }
+        }
+        Commands::QuickList { id } => {
+            let resp = client.get(format!("{}/services", cli.server)).send().await?;
+            let list: ServiceList = resp.json().await?;
+            if let Some(s) = list.services.into_iter().find(|v| v.get("id").and_then(|x| x.as_str()) == Some(&id)) {
+                if let Some(qs) = s.get("quick_commands").and_then(|q| q.as_array()) {
+                    for q in qs {
+                        let name = q.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        let desc = q.get("description").and_then(|d| d.as_str()).unwrap_or("");
+                        println!("- {}: {}", name, desc);
+                    }
+                } else { println!("no quick commands configured"); }
+            } else { println!("service not found"); }
+        }
+        Commands::QuickExec { id, quick } => {
+            let resp = client.post(format!("{}/services/quick", cli.server))
+                .json(&serde_json::json!({"id": id, "quick": quick}))
+                .send().await?;
+            println!("{}", resp.text().await?);
         }
         Commands::Start { id } => {
             let resp = client.post(format!("{}/services/cmd", cli.server))
