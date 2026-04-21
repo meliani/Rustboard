@@ -60,7 +60,7 @@ async fn main() {
     let url = format!("{}/models", base);
 
     let client = match reqwest::Client::builder()
-        .user_agent("rust-microservices-dashboard/plugin-openai-tester")
+        .user_agent("rustboard/plugin-openai-tester")
         .build()
     {
         Ok(c) => c,

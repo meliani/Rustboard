@@ -1,10 +1,21 @@
-# RUSH (Rust Dash)
+# Rustboard
 
-Lightweight Rust-based local LAN microservices dashboard (CLI + web). **RUSH** is an open-source contribution from **International Micro Services (IMS)** to the developer community.
+**Rustboard** is a lightweight, open-source microservices dashboard built in Rust — combining a real-time web UI, a CLI, and an extensible plugin system to monitor and manage services across your LAN over SSH.
 
-This repository contains:
+Open-source contribution by **International Micro Services (IMS)**.
 
-Quick start:
+## Features
+
+- Real-time service health monitoring (SSE + WebSocket)
+- Start / stop / restart services via SSH
+- Log tailing and custom quick commands
+- Docker service auto-discovery
+- Plugin system — installable extensions (e.g. `plugin-openai-tester`)
+- Network topology view
+- Dark-themed web UI (vanilla JS + HTMX, no framework)
+- CLI for scripting and automation
+
+## Quick Start
 
 ### Building a Local Executable
 
@@ -24,10 +35,10 @@ sh ./scripts/build-local.sh
 
 ```powershell
 # Start the core dashboard server
-.\rush-core.exe config\services.example.yaml
+.\rustboard-core.exe config\services.example.yaml
 
 # Manage using the CLI
-.\rush-cli.exe list
+.\rustboard-cli.exe list
 ```
 *(Note: Omit `.exe` on Linux/WSL)*
 
@@ -67,7 +78,7 @@ If you prefer to run commands manually in WSL:
 
 ```powershell
 # wsl
-# cd /mnt/c/code/dev-projects/RUST-MICROSERVICES-DASHBOARD
+# cd /mnt/c/code/dev-projects/Rustboard
 # cargo build --workspace
 # cargo run -p core -- config/services.example.yaml
 ```
