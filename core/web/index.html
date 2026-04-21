@@ -1,0 +1,946 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rustboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/htmx.org@1.9.2"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    :root {
+      --bg-color: #0d1117;
+      --panel-bg: rgba(22, 27, 34, 0.85);
+      --card-bg: #161b22;
+      --card-border: #30363d;
+      --text-main: #c9d1d9;
+      --text-dim: #8b949e;
+      --accent: #d35400;
+      --accent-hover: #e67e22;
+      --safe: #238636;
+      --danger: #da3633;
+      --info: #388bfd;
+      --warning: #d29922;
+      --discovered: #a855f7;
+      --sidebar-width: 260px;
+      --header-height: 64px;
+      --radius: 8px;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 0;
+      font-family: 'Inter', sans-serif;
+      background-color: var(--bg-color);
+      background-image:
+        radial-gradient(circle at 10% 20%, rgba(211, 84, 0, 0.05) 0%, transparent 40%),
+        radial-gradient(circle at 90% 80%, rgba(56, 139, 253, 0.05) 0%, transparent 40%);
+      color: var(--text-main);
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+    }
+
+    button {
+      cursor: pointer; font-family: inherit;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      border-radius: var(--radius); border: 1px solid var(--card-border);
+      background: var(--card-bg); color: var(--text-main);
+      padding: 8px 12px; display: inline-flex; align-items: center;
+      gap: 6px; font-weight: 500; font-size: 13px;
+    }
+    button:hover { background: #21262d; border-color: #8b949e; transform: translateY(-1px); }
+    button:active { transform: translateY(0); }
+    button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+    button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+    button.icon-only { padding: 8px; border-radius: 50%; }
+    button.discover-btn { background: rgba(168,85,247,0.12); border-color: var(--discovered); color: var(--discovered); }
+    button.discover-btn:hover { background: rgba(168,85,247,0.22); }
+
+    /* Layout */
+    .sidebar {
+      width: var(--sidebar-width);
+      background: var(--panel-bg);
+      border-right: 1px solid var(--card-border);
+      backdrop-filter: blur(12px);
+      display: flex; flex-direction: column; flex-shrink: 0; z-index: 100;
+    }
+    .sidebar-header { padding: 24px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--card-border); }
+    .logo-icon {
+      width: 32px; height: 32px; background: var(--accent);
+      border-radius: 8px; display: flex; align-items: center;
+      justify-content: center; color: white; box-shadow: 0 0 20px rgba(211, 84, 0, 0.4);
+    }
+    .sidebar-logo-text { font-weight: 700; font-size: 18px; letter-spacing: -0.5px; }
+    .nav-list { padding: 16px; list-style: none; margin: 0; flex-grow: 1; }
+    .nav-item {
+      padding: 12px 16px; border-radius: var(--radius); margin-bottom: 4px;
+      cursor: pointer; display: flex; align-items: center; gap: 12px;
+      color: var(--text-dim); font-weight: 500; transition: all 0.2s;
+    }
+    .nav-item:hover { color: var(--text-main); background: rgba(255, 255, 255, 0.05); }
+    .nav-item.active { color: white; background: rgba(211, 84, 0, 0.1); border-left: 3px solid var(--accent); border-radius: 0 var(--radius) var(--radius) 0; margin-left: -16px; padding-left: 29px; }
+
+    .main-container { flex-grow: 1; display: flex; flex-direction: column; position: relative; overflow: auto; }
+
+    .top-bar {
+      height: var(--header-height); padding: 0 32px;
+      display: flex; align-items: center; justify-content: space-between;
+      border-bottom: 1px solid var(--card-border); backdrop-filter: blur(8px);
+      position: sticky; top: 0; background: rgba(13, 17, 23, 0.8); z-index: 90;
+      gap: 12px; flex-wrap: nowrap;
+    }
+
+    .top-bar-left { display: flex; flex-direction: column; min-width: 0; }
+    .top-bar-right { display: flex; gap: 10px; align-items: center; flex-shrink: 0; flex-wrap: wrap; }
+
+    .content-area { padding: 32px; max-width: 1400px; width: 100%; margin: 0 auto; flex-grow: 1; display: none; }
+    .content-area.active { display: block; animation: fadeIn 0.3s ease-out; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* Service Grid */
+    .service-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 20px; }
+
+    /* Group sections */
+    .group-section { margin-bottom: 36px; }
+    .group-header {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 16px; margin-bottom: 16px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--card-border);
+      border-radius: 10px; cursor: pointer;
+      transition: background 0.2s;
+      user-select: none;
+    }
+    .group-header:hover { background: rgba(255,255,255,0.06); }
+    .group-header-label { font-weight: 600; font-size: 15px; flex-grow: 1; }
+    .group-header-count {
+      font-size: 11px; font-weight: 700; padding: 2px 8px;
+      border-radius: 20px; background: rgba(211,84,0,0.15); color: var(--accent);
+    }
+    .group-header-chevron { transition: transform 0.2s; color: var(--text-dim); }
+    .group-section.collapsed .group-header-chevron { transform: rotate(-90deg); }
+    .group-section.collapsed .service-grid { display: none; }
+    .group-host-badge {
+      font-family: 'JetBrains Mono', monospace; font-size: 11px;
+      color: var(--text-dim); background: rgba(255,255,255,0.05);
+      padding: 2px 7px; border-radius: 4px;
+    }
+    .group-stack-badge {
+      font-size: 11px; font-weight: 600;
+      padding: 2px 8px; border-radius: 20px;
+      background: rgba(56,139,253,0.12); color: var(--info);
+    }
+
+    /* Service card */
+    .service-card {
+      background: var(--card-bg); border: 1px solid var(--card-border);
+      border-radius: 12px; padding: 24px;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      position: relative; overflow: hidden;
+    }
+    .service-card:hover { border-color: var(--accent); transform: translateY(-4px); box-shadow: 0 10px 30px rgba(0,0,0,0.3); }
+    .service-card.status-running { border-left: 4px solid var(--safe); }
+    .service-card.status-stopped { border-left: 4px solid var(--danger); }
+    .service-card.status-error   { border-left: 4px solid var(--warning); }
+
+    .service-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
+    .service-title { font-weight: 600; font-size: 17px; margin: 0; }
+    .service-id { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); background: rgba(255,255,255,0.05); padding: 2px 6px; border-radius: 4px; }
+
+    .status-badge {
+      font-size: 11px; padding: 4px 8px; border-radius: 20px;
+      text-transform: uppercase; font-weight: 700; letter-spacing: 0.5px;
+      display: inline-flex; align-items: center; gap: 4px;
+    }
+    .status-running { background: rgba(35, 134, 54, 0.15); color: #3fb950; }
+    .status-stopped { background: rgba(218, 54, 51, 0.15); color: #f85149; }
+    .status-error   { background: rgba(210, 153, 34, 0.15); color: #d29922; }
+    .status-unknown { background: rgba(139, 148, 158, 0.15); color: #8b949e; }
+
+    /* Tags + stacks row */
+    .service-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 14px; }
+    .chip {
+      font-size: 10px; font-weight: 600; padding: 2px 7px;
+      border-radius: 20px; letter-spacing: 0.3px;
+    }
+    .chip-stack { background: rgba(56,139,253,0.12); color: var(--info); border: 1px solid rgba(56,139,253,0.2); }
+    .chip-tag   { background: rgba(255,255,255,0.06); color: var(--text-dim); border: 1px solid rgba(255,255,255,0.08); }
+    .chip-discovered { background: rgba(168,85,247,0.12); color: var(--discovered); border: 1px solid rgba(168,85,247,0.3); }
+
+    .service-info { margin-bottom: 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 13px; }
+    .info-item { display: flex; align-items: center; gap: 6px; color: var(--text-dim); }
+    .info-item i { width: 14px; height: 14px; }
+    .info-value { color: var(--text-main); font-weight: 500; }
+
+    .service-actions { display: flex; gap: 8px; flex-wrap: wrap; border-top: 1px solid var(--card-border); padding-top: 16px; }
+
+    /* Topology */
+    #topology-view { height: calc(100vh - var(--header-height) - 100px); }
+    #topology-container {
+      width: 100%; height: 100%;
+      background: var(--card-bg); border-radius: 12px;
+      border: 1px solid var(--card-border); padding: 40px;
+      display: flex; align-items: center; justify-content: center; overflow: auto;
+    }
+
+    /* Plugin */
+    .plugin-view { max-width: 900px; margin: 0 auto; }
+    .plugin-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 32px; }
+    .plugin-control { margin-bottom: 24px; }
+    .plugin-label { display: block; margin-bottom: 8px; font-weight: 600; color: var(--text-dim); font-size: 14px; }
+    select, textarea {
+      width: 100%; background: #0d1117; border: 1px solid var(--card-border);
+      color: var(--text-main); padding: 12px; border-radius: var(--radius);
+      font-family: 'JetBrains Mono', monospace; outline: none;
+    }
+    select:focus, textarea:focus { border-color: var(--accent); }
+    .plugin-output-pane { margin-top: 24px; background: #010409; padding: 20px; border-radius: var(--radius); border: 1px solid var(--card-border); }
+    #plugin-output { margin: 0; font-size: 13px; line-height: 1.5; color: #7ee787; overflow: auto; max-height: 400px; }
+
+    /* Modal / Logs */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.8);
+      backdrop-filter: blur(4px); z-index: 1000;
+      display: none; align-items: center; justify-content: center; padding: 40px;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal-content {
+      background: var(--card-bg); border: 1px solid var(--card-border);
+      width: 100%; max-width: 1000px; max-height: 80vh; border-radius: 16px;
+      display: flex; flex-direction: column; box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+    }
+    .modal-header { padding: 20px 24px; border-bottom: 1px solid var(--card-border); display: flex; justify-content: space-between; align-items: center; }
+    .modal-body { flex-grow: 1; overflow: hidden; padding: 0; }
+    .terminal {
+      background: #000; color: #fff; font-family: 'JetBrains Mono', monospace;
+      font-size: 13px; padding: 20px; height: 100%; overflow-y: auto; line-height: 1.6;
+    }
+    .log-line { border-left: 2px solid #333; padding-left: 10px; margin-bottom: 2px; white-space: pre-wrap; word-break: break-all; }
+    .log-line.error { border-left-color: var(--danger); color: #ffa3a3; }
+    .log-line.hidden { display: none; }
+    .log-line mark { background: #d35400; color: white; border-radius: 2px; }
+    .terminal-controls { display: flex; gap: 12px; align-items: center; }
+    .log-search-input { background: #161b22; border: 1px solid var(--card-border); color: white; padding: 4px 12px; border-radius: 4px; font-size: 13px; width: 220px; }
+
+    /* Discovery Drawer */
+    .drawer-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+      backdrop-filter: blur(3px); z-index: 500;
+      display: none; justify-content: flex-end;
+    }
+    .drawer-overlay.active { display: flex; }
+    .drawer {
+      width: 420px; height: 100%; background: var(--panel-bg);
+      border-left: 1px solid var(--card-border);
+      display: flex; flex-direction: column;
+      animation: slideIn 0.25s ease-out;
+      box-shadow: -20px 0 60px rgba(0,0,0,0.5);
+    }
+    @keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
+    .drawer-header {
+      padding: 24px; border-bottom: 1px solid var(--card-border);
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .drawer-body { flex-grow: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 20px; }
+    .drawer-footer { padding: 20px 24px; border-top: 1px solid var(--card-border); }
+
+    .discover-input-group { display: flex; flex-direction: column; gap: 6px; }
+    .discover-input-label { font-size: 12px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+    .discover-input {
+      background: rgba(255,255,255,0.04); border: 1px solid var(--card-border);
+      color: var(--text-main); padding: 10px 14px; border-radius: var(--radius);
+      font-size: 14px; font-family: 'JetBrains Mono', monospace; outline: none; width: 100%;
+      transition: border-color 0.2s;
+    }
+    .discover-input:focus { border-color: var(--discovered); }
+
+    .discover-result-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 14px; border-radius: var(--radius);
+      background: rgba(168,85,247,0.07); border: 1px solid rgba(168,85,247,0.2);
+      font-size: 13px;
+    }
+    .discover-result-item i { width: 14px; height: 14px; flex-shrink: 0; color: var(--discovered); }
+    .discover-result-name { flex-grow: 1; font-weight: 500; }
+    .discover-result-status { font-size: 11px; padding: 2px 7px; border-radius: 20px; font-weight: 700; }
+
+    .known-host-item {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 14px; border-radius: var(--radius);
+      background: rgba(255,255,255,0.03); border: 1px solid var(--card-border);
+      cursor: pointer; transition: all 0.2s;
+    }
+    .known-host-item:hover { background: rgba(255,255,255,0.06); border-color: var(--discovered); }
+    .known-host-addr { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+    .known-host-count { font-size: 11px; color: var(--text-dim); }
+
+    .discover-progress {
+      display: flex; align-items: center; gap: 12px;
+      padding: 14px 16px; border-radius: var(--radius);
+      background: rgba(168,85,247,0.07); border: 1px solid rgba(168,85,247,0.2);
+      font-size: 13px; color: var(--discovered);
+    }
+
+    /* Utils */
+    .pulse { animation: pulse 2s infinite; }
+    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+
+    [data-tooltip] { position: relative; }
+    [data-tooltip]::before {
+      content: attr(data-tooltip); position: absolute; bottom: 125%; left: 50%;
+      transform: translateX(-50%) translateY(10px);
+      background: #1f242c; color: white; padding: 6px 12px;
+      border-radius: 6px; font-size: 11px; white-space: nowrap;
+      opacity: 0; visibility: hidden;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4); border: 1px solid var(--card-border);
+      pointer-events: none; z-index: 1000;
+    }
+    [data-tooltip]:hover::before { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); }
+    body.no-tooltips [data-tooltip]::before { display: none !important; }
+
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 10px; }
+    ::-webkit-scrollbar-thumb:hover { background: #484f58; }
+  </style>
+</head>
+<body>
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="logo-icon"><i data-lucide="shield"></i></div>
+      <span class="sidebar-logo-text">Rustboard</span>
+    </div>
+    <ul class="nav-list">
+      <li class="nav-item active" data-view="nodes" data-tooltip="View and manage all services"><i data-lucide="layout-grid"></i> Services</li>
+      <li class="nav-item" data-view="topology" data-tooltip="Visualize service dependencies"><i data-lucide="git-merge"></i> Topology</li>
+      <li class="nav-item" data-view="plugins" data-tooltip="Run custom system extensions"><i data-lucide="zap"></i> Plugins</li>
+    </ul>
+    <div style="padding: 24px; border-top: 1px solid var(--card-border);">
+      <div id="connection-status" class="info-item">
+        <div style="width: 8px; height: 8px; background: var(--danger); border-radius: 50%;" id="status-dot"></div>
+        <span id="status-text">Disconnected</span>
+      </div>
+    <div style="padding: 12px 24px; border-top: 1px solid var(--card-border); font-size: 10px; color: var(--text-dim); text-align: center;">
+      An Open Source contribution from<br/>
+      <strong style="color: var(--accent);">International Micro Services (IMS)</strong>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main-container">
+    <header class="top-bar">
+      <div class="top-bar-left">
+        <h2 id="view-title" style="margin:0; font-size: 20px;">Rustboard</h2>
+        <span style="font-size: 12px; color: var(--text-dim);" id="view-subtitle">Monitor and control your LAN microservices</span>
+      </div>
+      <div class="top-bar-right">
+        <div style="position: relative; display: flex; align-items: center;">
+          <i data-lucide="search" style="position: absolute; left: 12px; width: 14px; color: var(--text-dim);"></i>
+          <input type="text" id="service-search" placeholder="Search services..." style="padding: 8px 12px 8px 34px; border-radius: var(--radius); border: 1px solid var(--card-border); background: var(--card-bg); color: var(--text-main); font-size: 13px; width: 200px;">
+        </div>
+        <select id="status-filter" style="width: auto; padding: 7px 12px; font-size: 13px; font-family: inherit;">
+          <option value="all">All Statuses</option>
+          <option value="running">Running</option>
+          <option value="stopped">Stopped</option>
+          <option value="error">Error</option>
+        </select>
+        <select id="group-by" style="width: auto; padding: 7px 12px; font-size: 13px; font-family: inherit;" data-tooltip="Group services by attribute">
+          <option value="none">No Grouping</option>
+          <option value="machine">By Machine</option>
+          <option value="stack">By Stack</option>
+          <option value="tag">By Tag</option>
+        </select>
+        <button id="discover-open-btn" class="discover-btn" data-tooltip="Auto-discover Docker services on a host">
+          <i data-lucide="scan-search" style="width:14px"></i> Discover
+        </button>
+        <button id="reload-config" data-tooltip="Refresh configuration from disk">
+          <i data-lucide="refresh-cw"></i> Reload
+        </button>
+        <div id="health-check" class="status-badge status-unknown">API: UNKNOWN</div>
+      </div>
+    </header>
+
+    <!-- Services View -->
+    <section id="view-nodes" class="content-area active">
+      <div id="services-list"><!-- Rendered by JS --></div>
+    </section>
+
+    <!-- Topology View -->
+    <section id="view-topology" class="content-area">
+      <div id="topology-view">
+        <div style="margin-bottom: 20px; display: flex; justify-content: flex-end;">
+          <button id="topology-refresh" class="primary"><i data-lucide="refresh-ccw"></i> Regenerate Graph</button>
+        </div>
+        <div id="topology-container"><div id="topology-render"></div></div>
+      </div>
+    </section>
+
+    <!-- Plugins View -->
+    <section id="view-plugins" class="content-area">
+      <div class="plugin-view">
+        <div class="plugin-card">
+          <div class="plugin-control">
+            <label class="plugin-label">Available Extension</label>
+            <select id="plugin-select"></select>
+          </div>
+          <div class="plugin-control">
+            <label class="plugin-label">Parameters (JSON)</label>
+            <textarea id="plugin-input" rows="5">{}</textarea>
+          </div>
+          <button id="plugin-run" class="primary" style="width: 100%; justify-content: center;"><i data-lucide="play-circle"></i> Execute Plugin</button>
+          <div class="plugin-output-pane">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+              <span class="plugin-label" style="margin:0">Execution Result</span>
+              <button class="icon-only" onclick="document.getElementById('plugin-output').textContent=''"><i data-lucide="trash-2" style="width:14px"></i></button>
+            </div>
+            <pre id="plugin-output">Ready...</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Logs Modal -->
+  <div id="logs-modal" class="modal-overlay">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 16px; flex-grow: 1;">
+          <div>
+            <h3 style="margin:0" id="log-service-name">Service Logs</h3>
+            <span id="log-service-host" style="font-size: 13px; color: var(--text-dim);"></span>
+          </div>
+          <div class="terminal-controls">
+            <input type="text" id="log-search" class="log-search-input" placeholder="Filter logs...">
+            <button id="log-live-toggle" style="background: var(--card-bg); color: var(--text-dim); border-color: var(--card-border);">
+              <i data-lucide="play" style="width:14px"></i> Live
+            </button>
+            <button id="log-show-more" data-tooltip="Fetch 200 more lines"><i data-lucide="plus" style="width:14px"></i> More</button>
+            <button id="log-download" class="icon-only" data-tooltip="Download logs"><i data-lucide="download"></i></button>
+            <button id="log-clear" class="icon-only" data-tooltip="Clear view"><i data-lucide="trash-2"></i></button>
+          </div>
+        </div>
+        <button class="icon-only" id="close-logs"><i data-lucide="x"></i></button>
+      </div>
+      <div class="modal-body" style="background: #000; position: relative;">
+        <div id="log-loading" style="position: absolute; inset: 0; background: rgba(0,0,0,0.5); display: none; align-items: center; justify-content: center; z-index: 10; flex-direction: column; gap:12px;">
+           <i data-lucide="loader-2" class="pulse" style="width:32px; height:32px; color: var(--accent);"></i>
+           <span style="font-size: 13px; color: var(--text-dim);">Fetching remote logs...</span>
+        </div>
+        <div class="terminal" id="log-terminal"></div>
+      </div>
+      <div style="padding: 12px 24px; background: rgba(0,0,0,0.2); border-top: 1px solid var(--card-border); display: flex; justify-content: space-between; color: var(--text-dim); font-size: 11px;">
+        <span id="log-streaming-status">Idle</span>
+        <span id="log-count">0 lines</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Discovery Drawer -->
+  <div id="discover-overlay" class="drawer-overlay">
+    <div class="drawer">
+      <div class="drawer-header">
+        <div>
+          <h3 style="margin:0; color: var(--discovered);">
+            <i data-lucide="scan-search" style="width:18px; vertical-align: middle; margin-right: 8px;"></i>Docker Discovery
+          </h3>
+          <p style="margin:4px 0 0; font-size: 12px; color: var(--text-dim);">SSH into a host and auto-detect all Docker containers</p>
+        </div>
+        <button class="icon-only" id="discover-close"><i data-lucide="x"></i></button>
+      </div>
+      <div class="drawer-body">
+        <!-- Known hosts -->
+        <div>
+          <p style="font-size: 11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-dim); margin:0 0 10px;">Known Hosts</p>
+          <div id="known-hosts-list" style="display:flex; flex-direction:column; gap:8px;">
+            <div style="color: var(--text-dim); font-size:13px;">Loading...</div>
+          </div>
+        </div>
+
+        <hr style="border-color: var(--card-border); margin: 0;">
+
+        <!-- Manual scan form -->
+        <div>
+          <p style="font-size: 11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-dim); margin:0 0 12px;">Scan a Host</p>
+          <div style="display:flex; flex-direction:column; gap:12px;">
+            <div class="discover-input-group">
+              <label class="discover-input-label">SSH Host / IP</label>
+              <input id="discover-host" class="discover-input" placeholder="10.0.2.100" type="text">
+            </div>
+            <div class="discover-input-group">
+              <label class="discover-input-label">SSH User (optional)</label>
+              <input id="discover-user" class="discover-input" placeholder="ims" type="text">
+            </div>
+          </div>
+        </div>
+
+        <!-- Progress/results -->
+        <div id="discover-progress" style="display:none;"></div>
+        <div id="discover-results" style="display:flex; flex-direction:column; gap:8px;"></div>
+      </div>
+      <div class="drawer-footer">
+        <button id="discover-scan-btn" class="primary" style="width:100%; justify-content:center; background: var(--discovered); border-color: var(--discovered);">
+          <i data-lucide="zap" style="width:14px"></i> Scan for Containers
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.2.3/dist/mermaid.min.js"></script>
+  <script>
+    // ─── App State ─────────────────────────────────────────────────────────────
+    let services = [];
+    let filteredServices = [];
+    let preferences = { show_tooltips: true };
+    let activeView = 'nodes';
+    let searchQuery = '';
+    let statusFilter = 'all';
+    let groupBy = 'none';
+
+    // ─── DOM refs ───────────────────────────────────────────────────────────────
+    const views        = document.querySelectorAll('.content-area');
+    const navItems     = document.querySelectorAll('.nav-item');
+    const servicesList = document.getElementById('services-list');
+    const logsModal    = document.getElementById('logs-modal');
+    const searchInput  = document.getElementById('service-search');
+    const statusSelect = document.getElementById('status-filter');
+    const groupSelect  = document.getElementById('group-by');
+
+    // ─── Filtering ──────────────────────────────────────────────────────────────
+    function updateFilters() {
+      searchQuery  = searchInput.value.toLowerCase();
+      statusFilter = statusSelect.value;
+      groupBy      = groupSelect.value;
+
+      filteredServices = services.filter(s => {
+        const q = searchQuery;
+        const matchSearch = !q ||
+          s.name.toLowerCase().includes(q) ||
+          s.id.toLowerCase().includes(q) ||
+          s.host.toLowerCase().includes(q) ||
+          (s.stacks || []).some(st => st.toLowerCase().includes(q)) ||
+          (s.tags   || []).some(t  => t.toLowerCase().includes(q));
+        const matchStatus = statusFilter === 'all' || s.status.toLowerCase() === statusFilter;
+        return matchSearch && matchStatus;
+      });
+
+      renderFilteredServices();
+    }
+
+    searchInput.addEventListener('input', updateFilters);
+    statusSelect.addEventListener('change', updateFilters);
+    groupSelect.addEventListener('change', updateFilters);
+
+    // ─── Card builder ───────────────────────────────────────────────────────────
+    function buildCard(s) {
+      const statusClass = `status-${s.status.toLowerCase()}`;
+      const stackChips  = (s.stacks || []).map(st =>
+        `<span class="chip chip-stack">${st}</span>`).join('');
+      const tagChips    = (s.tags || []).map(t =>
+        `<span class="chip chip-tag">${t}</span>`).join('');
+      const discChip    = s.discovered
+        ? `<span class="chip chip-discovered">✦ discovered</span>` : '';
+      const chips = stackChips + tagChips + discChip;
+
+      return `
+        <div class="service-card ${statusClass}" data-id="${s.id}">
+          <div class="service-header">
+            <div>
+              <h3 class="service-title">${s.name}</h3>
+              <span class="service-id">${s.id}</span>
+            </div>
+            <div class="status-badge ${statusClass}">
+              <div style="width:6px;height:6px;background:currentColor;border-radius:50%;"></div>
+              ${s.status}
+            </div>
+          </div>
+          ${chips ? `<div class="service-chips">${chips}</div>` : ''}
+          <div class="service-info">
+            <div class="info-item"><i data-lucide="server"></i><span class="info-value">${s.host}</span></div>
+            <div class="info-item"><i data-lucide="hash"></i><span class="info-value">${s.port || 'N/A'}</span></div>
+            <div class="info-item"><i data-lucide="user"></i><span class="info-value">${s.ssh_user || 'root'}</span></div>
+            <div class="info-item"><i data-lucide="box"></i><span class="info-value" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px;" title="${s.image||''}">${(s.image||'N/A').split('/').pop()}</span></div>
+          </div>
+          <div class="service-actions">
+            <button class="primary" onclick="postCmd('${s.id}','start')" data-tooltip="Start">
+              <i data-lucide="play" style="width:14px"></i> Start
+            </button>
+            <button onclick="postCmd('${s.id}','restart')" data-tooltip="Restart">
+              <i data-lucide="rotate-ccw" style="width:14px"></i>
+            </button>
+            <button onclick="postCmd('${s.id}','stop')" data-tooltip="Stop">
+              <i data-lucide="square" style="width:14px"></i>
+            </button>
+            <button onclick="showLogs('${s.id}')" data-tooltip="View logs">
+              <i data-lucide="terminal" style="width:14px"></i> Logs
+            </button>
+          </div>
+        </div>`;
+    }
+
+    // ─── Grouped rendering ──────────────────────────────────────────────────────
+    function renderFilteredServices() {
+      if (groupBy === 'none') {
+        servicesList.innerHTML = `<div class="service-grid">${filteredServices.map(buildCard).join('')}</div>`;
+        lucide.createIcons();
+        return;
+      }
+
+      // Build bucket map — a service may appear in multiple buckets (stacks/tags)
+      const buckets = new Map();
+      const addTo = (key, svc) => {
+        if (!buckets.has(key)) buckets.set(key, []);
+        buckets.get(key).push(svc);
+      };
+
+      filteredServices.forEach(s => {
+        if (groupBy === 'machine') {
+          addTo(s.host, s);
+        } else if (groupBy === 'stack') {
+          const arr = s.stacks && s.stacks.length ? s.stacks : ['(no stack)'];
+          arr.forEach(st => addTo(st, s));
+        } else if (groupBy === 'tag') {
+          const arr = s.tags && s.tags.length ? s.tags : ['(untagged)'];
+          arr.forEach(t => addTo(t, s));
+        }
+      });
+
+      let html = '';
+      buckets.forEach((items, key) => {
+        const icon = groupBy === 'machine' ? 'server'
+                   : groupBy === 'stack'   ? 'layers'
+                   :                         'tag';
+        const badge = groupBy === 'machine'
+          ? `<span class="group-host-badge">${key}</span>`
+          : `<span class="group-stack-badge">${key}</span>`;
+
+        html += `
+          <div class="group-section" id="group-${CSS.escape(key)}">
+            <div class="group-header" onclick="toggleGroup(this)">
+              <i data-lucide="${icon}" style="width:16px; color:var(--text-dim);"></i>
+              <span class="group-header-label">${badge}</span>
+              <span class="group-header-count">${items.length} service${items.length !== 1 ? 's' : ''}</span>
+              <i data-lucide="chevron-down" class="group-header-chevron" style="width:16px;"></i>
+            </div>
+            <div class="service-grid">${items.map(buildCard).join('')}</div>
+          </div>`;
+      });
+
+      servicesList.innerHTML = html;
+      lucide.createIcons();
+    }
+
+    function toggleGroup(header) {
+      header.closest('.group-section').classList.toggle('collapsed');
+      lucide.createIcons();
+    }
+
+    // ─── Navigation ─────────────────────────────────────────────────────────────
+    lucide.createIcons();
+    navItems.forEach(item => item.addEventListener('click', () => switchView(item.dataset.view)));
+
+    function switchView(viewId) {
+      activeView = viewId;
+      navItems.forEach(i => i.classList.remove('active'));
+      document.querySelector(`[data-view="${viewId}"]`).classList.add('active');
+      views.forEach(v => v.classList.remove('active'));
+      document.getElementById(`view-${viewId}`).classList.add('active');
+      const titles = { nodes: 'Service Dashboard', topology: 'Network Topology', plugins: 'System Extensions' };
+      document.getElementById('view-title').textContent = titles[viewId];
+      if (viewId === 'topology') refreshTopology();
+      if (viewId === 'plugins')  loadPlugins();
+    }
+
+    // ─── Commands ───────────────────────────────────────────────────────────────
+    async function postCmd(id, cmd) {
+      if (window.wsClient && window.wsClient.readyState === WebSocket.OPEN) {
+        window.wsClient.send(JSON.stringify({ type: 'cmd', id, cmd }));
+      } else {
+        await fetch('/services/cmd', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, cmd })
+        });
+      }
+    }
+
+    // ─── Logs ───────────────────────────────────────────────────────────────────
+    let currentLogServiceId = null, currentLogLines = 200;
+    let isLiveLogs = false, liveLogsInterval = null, autoScroll = true;
+
+    async function showLogs(id) {
+      if (currentLogServiceId !== id) { currentLogServiceId = id; currentLogLines = 200; }
+      const service = services.find(s => s.id === id);
+      if (!service) return;
+      document.getElementById('log-service-name').textContent = `Logs: ${service.name}`;
+      document.getElementById('log-service-host').textContent = service.host;
+      document.getElementById('log-loading').style.display = 'flex';
+      const terminal = document.getElementById('log-terminal');
+      if (!terminal.innerHTML) terminal.innerHTML = '<div class="log-line">Requesting logs from host...</div>';
+      logsModal.classList.add('active');
+      await fetchLogs();
+    }
+
+    async function fetchLogs() {
+      if (!currentLogServiceId) return;
+      document.getElementById('log-streaming-status').textContent = 'Fetching logs...';
+      try {
+        const res  = await fetch('/services/logs', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: currentLogServiceId, lines: currentLogLines })
+        });
+        const data = await res.json();
+        document.getElementById('log-loading').style.display = 'none';
+        if (data.ok) {
+          renderLogs(data.logs);
+          document.getElementById('log-streaming-status').textContent =
+            isLiveLogs ? 'Live Polling Active (5s)' : 'Last fetch: ' + new Date().toLocaleTimeString();
+        } else {
+          document.getElementById('log-terminal').innerHTML = `<div class="log-line error">Error: ${data.error}</div>`;
+          document.getElementById('log-streaming-status').textContent = 'Fetch failed';
+        }
+      } catch (e) {
+        document.getElementById('log-terminal').innerHTML = `<div class="log-line error">Failed: ${e}</div>`;
+        document.getElementById('log-streaming-status').textContent = 'Network error';
+      }
+    }
+
+    function renderLogs(logsText) {
+      const terminal = document.getElementById('log-terminal');
+      const query    = document.getElementById('log-search').value.toLowerCase();
+      const lines    = logsText.split('\n');
+      terminal.innerHTML = lines.map(l => {
+        const esc = l.replace(/</g, '&lt;');
+        const isMatch = !query || l.toLowerCase().includes(query);
+        let content = esc;
+        if (query && isMatch) content = content.replace(new RegExp(`(${query})`, 'gi'), '<mark>$1</mark>');
+        return `<div class="log-line ${isMatch ? '' : 'hidden'}">${content}</div>`;
+      }).join('');
+      document.getElementById('log-count').textContent = `${lines.length} lines`;
+      if (autoScroll) terminal.scrollTop = terminal.scrollHeight;
+    }
+
+    document.getElementById('close-logs').onclick = () => { logsModal.classList.remove('active'); stopLiveLogs(); };
+    document.getElementById('log-search').addEventListener('input', e => {
+      const q = e.target.value.toLowerCase();
+      document.querySelectorAll('#log-terminal .log-line').forEach(l =>
+        l.classList.toggle('hidden', !!q && !l.textContent.toLowerCase().includes(q)));
+    });
+    document.getElementById('log-show-more').onclick = () => { currentLogLines += 200; fetchLogs(); };
+    document.getElementById('log-download').onclick = () => {
+      const text = [...document.querySelectorAll('#log-terminal .log-line')].map(l => l.textContent).join('\n');
+      const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([text], { type: 'text/plain' })), download: `${currentLogServiceId}_logs.txt` });
+      a.click();
+    };
+    document.getElementById('log-clear').onclick = () => { document.getElementById('log-terminal').innerHTML = ''; };
+    document.getElementById('log-live-toggle').onclick = () => {
+      isLiveLogs = !isLiveLogs;
+      const btn = document.getElementById('log-live-toggle');
+      if (isLiveLogs) {
+        btn.innerHTML = '<i data-lucide="pause" style="width:14px"></i> Pause';
+        btn.style.cssText += 'border-color:var(--safe);color:var(--safe)';
+        liveLogsInterval = setInterval(fetchLogs, 5000);
+      } else {
+        stopLiveLogs();
+      }
+      lucide.createIcons();
+    };
+    function stopLiveLogs() {
+      clearInterval(liveLogsInterval); liveLogsInterval = null; isLiveLogs = false;
+      const btn = document.getElementById('log-live-toggle');
+      btn.innerHTML = '<i data-lucide="play" style="width:14px"></i> Live';
+      btn.style.borderColor = 'var(--card-border)'; btn.style.color = 'var(--text-dim)';
+      lucide.createIcons();
+    }
+    document.getElementById('log-terminal').addEventListener('scroll', e => {
+      const t = e.target;
+      autoScroll = (t.scrollTop + t.offsetHeight) >= (t.scrollHeight - 20);
+    });
+
+    // ─── Discovery Drawer ───────────────────────────────────────────────────────
+    const discoverOverlay = document.getElementById('discover-overlay');
+
+    document.getElementById('discover-open-btn').onclick = async () => {
+      discoverOverlay.classList.add('active');
+      await loadKnownHosts();
+      lucide.createIcons();
+    };
+    document.getElementById('discover-close').onclick = () => discoverOverlay.classList.remove('active');
+    discoverOverlay.addEventListener('click', e => { if (e.target === discoverOverlay) discoverOverlay.classList.remove('active'); });
+
+    async function loadKnownHosts() {
+      const list = document.getElementById('known-hosts-list');
+      try {
+        const r = await fetch('/discover/hosts');
+        const j = await r.json();
+        const hosts = j.hosts || [];
+        if (!hosts.length) { list.innerHTML = '<div style="color:var(--text-dim);font-size:13px;">No hosts known yet</div>'; return; }
+        list.innerHTML = hosts.map(h => `
+          <div class="known-host-item" onclick="quickScan('${h.host}')">
+            <i data-lucide="server" style="width:14px;color:var(--text-dim);flex-shrink:0;"></i>
+            <span class="known-host-addr">${h.host}</span>
+            <span class="known-host-count">${h.service_count} services</span>
+            <i data-lucide="zap" style="width:12px;color:var(--discovered);"></i>
+          </div>`).join('');
+      } catch (e) {
+        list.innerHTML = `<div style="color:var(--danger);font-size:13px;">Failed to load hosts: ${e}</div>`;
+      }
+    }
+
+    async function quickScan(host) {
+      document.getElementById('discover-host').value = host;
+      await runDiscovery(host, null);
+    }
+
+    document.getElementById('discover-scan-btn').onclick = async () => {
+      const host = document.getElementById('discover-host').value.trim();
+      const user = document.getElementById('discover-user').value.trim() || null;
+      if (!host) { alert('Please enter a host/IP'); return; }
+      await runDiscovery(host, user);
+    };
+
+    async function runDiscovery(host, sshUser) {
+      const progress = document.getElementById('discover-progress');
+      const results  = document.getElementById('discover-results');
+      progress.style.display = 'flex';
+      progress.innerHTML = `<div class="discover-progress"><i data-lucide="loader-2" class="pulse" style="width:16px;flex-shrink:0;"></i> Scanning ${host} via SSH...</div>`;
+      results.innerHTML = '';
+      lucide.createIcons();
+
+      try {
+        const res  = await fetch('/discover', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host, ssh_user: sshUser })
+        });
+        const data = await res.json();
+        progress.style.display = 'none';
+
+        if (!data.ok) {
+          results.innerHTML = `<div style="color:var(--danger);font-size:13px;padding:12px;background:rgba(218,54,51,0.08);border:1px solid rgba(218,54,51,0.2);border-radius:8px;">Error: ${data.error}</div>`;
+          return;
+        }
+
+        const found = data.services || [];
+        if (!found.length) {
+          results.innerHTML = `<div style="color:var(--text-dim);font-size:13px;padding:12px;">No new containers found (all already tracked).</div>`;
+        } else {
+          results.innerHTML = `<p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--discovered);margin:0 0 10px;">✦ ${found.length} new service${found.length!==1?'s':''} discovered</p>` +
+            found.map(s => `
+              <div class="discover-result-item">
+                <i data-lucide="box"></i>
+                <span class="discover-result-name">${s.name}</span>
+                <span class="discover-result-status ${s.status === 'running' ? 'status-running' : 'status-stopped'}">${s.status}</span>
+              </div>`).join('');
+        }
+        lucide.createIcons();
+        // refresh the main view
+        await fetchServices();
+        await loadKnownHosts();
+      } catch (e) {
+        progress.style.display = 'none';
+        results.innerHTML = `<div style="color:var(--danger);font-size:13px;">Network error: ${e}</div>`;
+      }
+    }
+
+    // ─── WebSocket ──────────────────────────────────────────────────────────────
+    function initWS() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws    = new WebSocket(proto + '://' + location.host + '/ws');
+      window.wsClient = ws;
+      ws.onopen  = () => { document.getElementById('status-dot').style.background = 'var(--safe)'; document.getElementById('status-text').textContent = 'Live Connected'; };
+      ws.onmessage = e => {
+        try {
+          const d = JSON.parse(e.data);
+          if (d.type === 'full_state')    renderServices(d.services || []);
+          else if (d.type === 'service_update') updateService(d.service);
+        } catch (err) { console.error('WS:', err); }
+      };
+      ws.onclose = () => { document.getElementById('status-dot').style.background = 'var(--danger)'; document.getElementById('status-text').textContent = 'Disconnected - Retrying...'; setTimeout(initWS, 2000); };
+    }
+
+    // ─── Rendering helpers ──────────────────────────────────────────────────────
+    function renderServices(list) { services = list; updateFilters(); }
+    function updateService(s) {
+      const idx = services.findIndex(x => x.id === s.id);
+      if (idx !== -1) services[idx] = s; else services.push(s);
+      updateFilters();
+    }
+    async function fetchServices() {
+      const r = await fetch('/services');
+      const j = await r.json();
+      renderServices(j.services || []);
+    }
+
+    // ─── Topology ───────────────────────────────────────────────────────────────
+    async function refreshTopology() {
+      const container = document.getElementById('topology-render');
+      container.innerHTML = '<div class="pulse">Generating dependency graph...</div>';
+      try {
+        const j = await (await fetch('/topology')).json();
+        const nodes = j.nodes || [], edges = j.edges || [];
+        let g = 'graph TD\n  classDef default fill:#161b22,stroke:#30363d,color:#c9d1d9;\n  classDef running fill:rgba(35,134,54,0.1),stroke:#3fb950,color:#3fb950;\n';
+        nodes.forEach(n => {
+          const s = services.find(x => x.id === n);
+          g += `  ${n}["<div style='padding:8px'><b>${s?.name||n}</b><br/><small>${n}</small></div>"]${s?.status==='running'?':::running':''}\n`;
+        });
+        edges.forEach(e => { g += `  ${e.from} --> ${e.to}\n`; });
+        container.innerHTML = `<div class="mermaid">${g}</div>`;
+        mermaid.init(undefined, container.querySelectorAll('.mermaid'));
+      } catch (e) { container.innerHTML = `<div class="status-error">Failed: ${e}</div>`; }
+    }
+    document.getElementById('topology-refresh').onclick = refreshTopology;
+
+    // ─── Plugins ────────────────────────────────────────────────────────────────
+    async function loadPlugins() {
+      const sel = document.getElementById('plugin-select');
+      sel.innerHTML = '<option>Loading...</option>';
+      try {
+        const j = await (await fetch('/plugins')).json();
+        sel.innerHTML = (j.plugins||[]).map(n => `<option value="${n}">${n}</option>`).join('');
+      } catch { sel.innerHTML = '<option>Error loading</option>'; }
+    }
+    document.getElementById('plugin-run').onclick = async () => {
+      const name   = document.getElementById('plugin-select').value;
+      const input  = document.getElementById('plugin-input').value;
+      const output = document.getElementById('plugin-output');
+      output.textContent = 'Executing...';
+      try {
+        const res = await fetch('/plugins/exec', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, input: JSON.parse(input) }) });
+        output.textContent = JSON.stringify(await res.json(), null, 2);
+      } catch (e) { output.textContent = `Failed: ${e}`; }
+    };
+
+    // ─── Global ─────────────────────────────────────────────────────────────────
+    document.getElementById('reload-config').onclick = async () => {
+      const data = await (await fetch('/config/reload', { method: 'POST' })).json();
+      if (data.ok) console.log('Config reloaded');
+    };
+
+    async function checkHealth() {
+      const el = document.getElementById('health-check');
+      try {
+        const r = await fetch('/health');
+        el.className = r.ok ? 'status-badge status-running' : 'status-badge status-error';
+        el.textContent = r.ok ? 'API: ONLINE' : 'API: ERROR';
+      } catch { el.className = 'status-badge status-stopped'; el.textContent = 'API: OFFLINE'; }
+    }
+
+    async function fetchPreferences() {
+      try {
+        preferences = await (await fetch('/preferences')).json();
+        document.body.classList.toggle('no-tooltips', !preferences.show_tooltips);
+      } catch (e) { console.error('Failed to fetch prefs', e); }
+    }
+
+    // ─── Startup ────────────────────────────────────────────────────────────────
+    initWS();
+    fetchServices();
+    fetchPreferences();
+    setInterval(checkHealth, 5000);
+    checkHealth();
+  </script>
+</body>
+</html>
