@@ -2,15 +2,44 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
+  # Keep manual tag-based trigger so scripts/release.ps1|sh still work too
+  # (a tag push doesn't re-trigger the branch push event, so no double-run)
 
 permissions:
   contents: write
 
 jobs:
+  auto-tag:
+    name: Auto-bump version tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full tag history
+
+      - name: Bump patch version and push tag
+        id: bump
+        run: |
+          git fetch --tags
+          LATEST=$(git tag --list "v*" --sort=-version:refname | head -1)
+          LATEST="${LATEST:-v0.0.0}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "${LATEST#v}"
+          PATCH=$((PATCH + 1))
+          TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "Bumping $LATEST → $TAG"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build — ${{ matrix.target }}
+    needs: auto-tag
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -70,7 +99,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [auto-tag, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -87,9 +116,10 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          name: Rustboard ${{ github.ref_name }}
+          tag_name: ${{ needs.auto-tag.outputs.tag }}
+          name: Rustboard ${{ needs.auto-tag.outputs.tag }}
           body: |
-            ## Rustboard ${{ github.ref_name }}
+            ## Rustboard ${{ needs.auto-tag.outputs.tag }}
 
             ### Install (Linux / macOS)
             ```bash
