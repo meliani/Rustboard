@@ -2,8 +2,6 @@
 
 **Rustboard** is a lightweight, open-source microservices dashboard built in Rust — combining a real-time web UI, a CLI, and an extensible plugin system to monitor and manage services across your LAN over SSH.
 
-Open-source contribution by **International Micro Services (IMS)**.
-
 ## Features
 
 - Real-time service health monitoring (SSE + WebSocket)
@@ -15,7 +13,62 @@ Open-source contribution by **International Micro Services (IMS)**.
 - Dark-themed web UI (vanilla JS + HTMX, no framework)
 - CLI for scripting and automation
 
-## Quick Start
+## Included Plugin
+
+This repository includes a sample plugin: `plugin-openai-tester` (source in `plugin-openai-tester/`). The plugin verifies OpenAI-compatible API keys by querying the `/models` endpoint and returns a JSON result suitable for the dashboard plugin contract.
+
+Build and install the plugin into `plugins/bin/` using the included scripts:
+
+**PowerShell**
+```powershell
+.\scripts\install-plugin-openai-tester.ps1 -Release
+```
+
+**Bash**
+```bash
+./scripts/install-plugin-openai-tester.sh --release
+```
+
+Usage via the dashboard API:
+
+```json
+POST /plugins/exec
+{ "name": "plugin-openai-tester", "input": { "api_key": "sk-..." } }
+```
+
+You can also run the plugin locally for quick testing:
+
+```bash
+echo '{"api_key":"sk-invalid-key"}' | ./target/debug/plugin-openai-tester
+```
+
+## Installation
+
+### Download a prebuilt release (recommended)
+
+**Linux / macOS**
+```bash
+curl -fsSL https://raw.githubusercontent.com/meliani/Rustboard/main/install.sh | bash
+```
+
+**Windows (PowerShell)**
+```powershell
+irm https://raw.githubusercontent.com/meliani/Rustboard/main/install.ps1 | iex
+```
+
+The installer auto-detects your platform, downloads the latest binaries from the [GitHub Releases page](https://github.com/meliani/Rustboard/releases), and adds them to your PATH.
+
+> **Custom install directory**
+> ```bash
+> # Linux / macOS
+> curl -fsSL .../install.sh | bash -s -- --dir ~/.local/bin
+> # Windows
+> $env:RUSTBOARD_DIR = "$HOME\.rustboard\bin"; irm .../install.ps1 | iex
+> ```
+
+---
+
+## Build from Source
 
 ### Building a Local Executable
 
