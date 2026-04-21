@@ -1,0 +1,35 @@
+- id: "web-app"
+  name: "web-app"
+  host: "10.0.2.251"
+  port: 8000
+  ssh_user: "$(whoami)"
+  start_cmd: "systemctl start web-app"
+  stop_cmd: "systemctl stop web-app"
+  restart_cmd: "systemctl restart web-app"
+  log_path: "/var/log/web-app.log"
+  quick_commands:
+    - name: "shell"
+      cmd: "sh -lc 'bash -l || sh'"
+      description: "Open interactive shell inside container"
+      in_container: true
+    - name: "ls_app"
+      cmd: "sh -lc 'ls -la /app || ls -la /var/www || ls -la /'"
+      description: "List app folder inside container"
+      in_container: true
+  dependencies: []
+
+- id: "database"
+  name: "database"
+  host: "10.0.2.200"
+  port: 5432
+  ssh_user: "$(whoami)"
+  start_cmd: "systemctl start postgresql"
+  stop_cmd: "systemctl stop postgresql"
+  restart_cmd: "systemctl restart postgresql"
+  log_path: "/var/log/postgresql/postgresql.log"
+  quick_commands:
+    - name: "psql"
+      cmd: "psql -U postgres"
+      description: "Open psql shell on host"
+      in_container: false
+  dependencies: []
