@@ -129,10 +129,45 @@ Example (PowerShell):
 
 If you prefer to run commands manually in WSL:
 
-```powershell
+```bash
 # wsl
 # cd /mnt/c/code/dev-projects/Rustboard
 # cargo build --workspace
 # cargo run -p core -- config/services.example.yaml
 ```
+
+---
+
+## Releases
+
+Every push to `main` automatically builds and publishes a new release:
+
+1. Patch version is bumped automatically (`v0.1.3 → v0.1.4`)
+2. Binaries are built for Linux, Windows, and macOS (x86_64 + Apple Silicon)
+3. A [GitHub Release](https://github.com/meliani/Rustboard/releases) is published with all binaries attached
+
+For a **minor or major** version bump, use the release scripts:
+
+```powershell
+# Windows
+.\scripts\release.ps1 minor
+.\scripts\release.ps1 1.0.0
 ```
+```bash
+# Linux / macOS
+./scripts/release.sh minor
+./scripts/release.sh 1.0.0
+```
+
+---
+
+## Contributing
+
+See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for the full developer guide, including:
+
+- Project structure
+- Local dev setup and running tests
+- Writing and installing plugins
+- The release process in detail
+- How to submit a PR
+
