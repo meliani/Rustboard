@@ -302,6 +302,33 @@
     [data-tooltip]:hover::before { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); }
     body.no-tooltips [data-tooltip]::before { display: none !important; }
 
+    /* Machine disk / docker space gauges in group header */
+    .machine-meta-row {
+      display: flex; align-items: center; gap: 10px; margin-left: auto;
+    }
+    .disk-gauge-wrap {
+      display: flex; align-items: center; gap: 5px;
+      font-size: 10px; color: var(--text-dim);
+      white-space: nowrap;
+    }
+    .disk-gauge-bar {
+      width: 72px; height: 6px;
+      background: rgba(255,255,255,0.08);
+      border-radius: 3px; overflow: hidden; flex-shrink: 0;
+    }
+    .docker-space-wrap { display: flex; align-items: center; }
+    .forget-machine-btn {
+      padding: 3px 6px; border-radius: 4px; font-size: 11px;
+      background: transparent; border: 1px solid transparent;
+      color: var(--text-dim); transition: all 0.15s;
+      display: inline-flex; align-items: center;
+    }
+    .forget-machine-btn:hover {
+      background: rgba(218,54,51,0.12); border-color: var(--danger); color: var(--danger);
+      transform: none;
+    }
+    .gauge-loading { font-size: 9px; color: var(--text-dim); opacity: 0.5; }
+
     ::-webkit-scrollbar { width: 8px; height: 8px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 10px; }
@@ -610,6 +637,8 @@
       });
 
       let html = '';
+      const machinesToLoad = [];
+
       buckets.forEach((items, key) => {
         const icon = groupBy === 'machine' ? 'server'
                    : groupBy === 'stack'   ? 'layers'
@@ -618,12 +647,30 @@
           ? `<span class="group-host-badge">${key}</span>`
           : `<span class="group-stack-badge">${key}</span>`;
 
+        let machineExtras = '';
+        if (groupBy === 'machine') {
+          const mid = machineId(key);
+          const sshUser = items[0]?.ssh_user || '';
+          machinesToLoad.push({ host: key, sshUser });
+          machineExtras = `
+            <div class="machine-meta-row" onclick="event.stopPropagation()">
+              <div class="disk-gauge-wrap" id="dg-${mid}">
+                <span class="gauge-loading pulse">●</span>
+              </div>
+              <div class="docker-space-wrap" id="ds-${mid}"></div>
+              <button class="forget-machine-btn" onclick="forgetMachine('${key}'); event.stopPropagation();" data-tooltip="Forget machine — removes all its services from the dashboard">
+                <i data-lucide="trash-2" style="width:12px;height:12px;"></i>
+              </button>
+            </div>`;
+        }
+
         html += `
           <div class="group-section" id="group-${CSS.escape(key)}">
             <div class="group-header" onclick="toggleGroup(this)">
               <i data-lucide="${icon}" style="width:16px; color:var(--text-dim);"></i>
               <span class="group-header-label">${badge}</span>
               <span class="group-header-count">${items.length} service${items.length !== 1 ? 's' : ''}</span>
+              ${machineExtras}
               <i data-lucide="chevron-down" class="group-header-chevron" style="width:16px;"></i>
             </div>
             <div class="service-grid">${items.map(buildCard).join('')}</div>
@@ -632,6 +679,9 @@
 
       servicesList.innerHTML = html;
       lucide.createIcons();
+
+      // Deferred: fetch disk + docker space for each machine group
+      machinesToLoad.forEach(({ host, sshUser }) => scheduleMachineSpaceLoad(host, sshUser));
     }
 
     function toggleGroup(header) {
@@ -912,6 +962,99 @@
         output.textContent = JSON.stringify(await res.json(), null, 2);
       } catch (e) { output.textContent = `Failed: ${e}`; }
     };
+
+    // ─── Machine space gauges (deferred) ────────────────────────────────────────
+    const _machineLoadTimers = new Map();
+
+    function machineId(host) {
+      return 'mch_' + host.replace(/[^a-zA-Z0-9]/g, '_');
+    }
+
+    function fmtKB(kb) {
+      if (kb >= 1024 * 1024 * 1024) return (kb / 1024 / 1024 / 1024).toFixed(1) + 'TB';
+      if (kb >= 1024 * 1024)        return (kb / 1024 / 1024).toFixed(1) + 'GB';
+      if (kb >= 1024)               return (kb / 1024).toFixed(1) + 'MB';
+      return kb + 'KB';
+    }
+
+    function scheduleMachineSpaceLoad(host, sshUser) {
+      if (_machineLoadTimers.has(host)) clearTimeout(_machineLoadTimers.get(host));
+      const t = setTimeout(() => {
+        _machineLoadTimers.delete(host);
+        loadMachineSpace(host, sshUser);
+      }, 300);
+      _machineLoadTimers.set(host, t);
+    }
+
+    function loadMachineSpace(host, sshUser) {
+      const mid = machineId(host);
+      const diskEl   = document.getElementById('dg-' + mid);
+      const dockerEl = document.getElementById('ds-' + mid);
+      const qs = 'host=' + encodeURIComponent(host) +
+                 (sshUser ? '&ssh_user=' + encodeURIComponent(sshUser) : '');
+
+      // Disk usage
+      if (diskEl) {
+        fetch('/machines/disk?' + qs)
+          .then(r => r.json())
+          .then(d => {
+            if (!document.getElementById('dg-' + mid)) return; // element gone (re-render)
+            if (d.ok) {
+              const pct   = Math.min(100, Math.round(d.used_kb / d.total_kb * 100));
+              const color = pct > 90 ? 'var(--danger)' : pct > 70 ? 'var(--warning)' : 'var(--safe)';
+              diskEl.innerHTML =
+                `<span style="font-size:10px;color:var(--text-dim);">${fmtKB(d.used_kb)}/${fmtKB(d.total_kb)}</span>` +
+                `<div class="disk-gauge-bar" data-tooltip="${pct}% disk used">` +
+                `  <div style="width:${pct}%;background:${color};height:100%;border-radius:3px;transition:width .6s ease;"></div>` +
+                `</div>` +
+                `<span style="font-size:10px;color:${color};font-weight:600;">${pct}%</span>`;
+            } else {
+              diskEl.innerHTML = '<span style="font-size:10px;color:var(--text-dim);">disk N/A</span>';
+            }
+          })
+          .catch(() => { if (diskEl) diskEl.innerHTML = ''; });
+      }
+
+      // Docker reclaimable (slightly later to spread SSH load)
+      setTimeout(() => {
+        if (!dockerEl || !document.getElementById('ds-' + mid)) return;
+        fetch('/machines/docker?' + qs)
+          .then(r => r.json())
+          .then(d => {
+            if (!document.getElementById('ds-' + mid)) return;
+            if (d.ok && Array.isArray(d.items) && d.items.length) {
+              const nonZero = d.items.filter(i => i.Reclaimable && i.Reclaimable !== '0B');
+              if (nonZero.length) {
+                const tip  = nonZero.map(i => i.Type + ': ' + i.Reclaimable).join(' | ');
+                const label = nonZero[0].Reclaimable.split(' ')[0] +
+                              (nonZero.length > 1 ? '+' : '');
+                dockerEl.innerHTML =
+                  `<span class="chip chip-tag" style="font-size:10px;padding:1px 6px;cursor:default;" data-tooltip="${tip}">♻ ${label}</span>`;
+                lucide.createIcons();
+              }
+            }
+          })
+          .catch(() => {});
+      }, 600);
+    }
+
+    // ─── Forget machine ──────────────────────────────────────────────────────────
+    async function forgetMachine(host) {
+      if (!confirm('Remove all services for ' + host + ' from the dashboard?\n\nThis also deletes the local discovered config file for this host.')) return;
+      try {
+        const r = await fetch('/machines/forget', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host })
+        });
+        const d = await r.json();
+        if (!d.ok) alert('Failed to forget machine: ' + (d.error || 'unknown error'));
+        // State update comes via WebSocket broadcast; fetchServices as fallback
+        await fetchServices();
+      } catch (e) {
+        alert('Network error: ' + e);
+      }
+    }
 
     // ─── Global ─────────────────────────────────────────────────────────────────
     document.getElementById('reload-config').onclick = async () => {

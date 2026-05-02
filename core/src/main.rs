@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::path::PathBuf;
 use std::convert::Infallible;
-use axum::{routing::{get, post}, Router, Json, extract::Extension};
+use axum::{routing::{get, post}, Router, Json, extract::{Extension, Query}};
 use axum::response::sse::{Sse, Event};
 use axum::response::Html;
 use axum::extract::ws::{WebSocketUpgrade, Message, WebSocket};
@@ -132,6 +132,49 @@ struct CmdBody { id: String, cmd: String }
 struct LogsReq { id: String, lines: Option<usize> }
 async fn health() -> &'static str { "ok" }
 
+// ── Machine-level info endpoints (no shared state needed) ─────────────────────
+
+#[derive(serde::Deserialize)]
+struct MachineQuery { host: String, ssh_user: Option<String> }
+
+/// GET /machines/disk?host=HOST&ssh_user=USER
+/// Returns disk usage for `/` on the remote host in kilobytes.
+async fn machine_disk(Query(q): Query<MachineQuery>) -> Json<serde_json::Value> {
+    // `df -k /` prints sizes in 1-KiB blocks; NR==2 is the data row.
+    let cmd = "df -k / 2>/dev/null | awk 'NR==2{print $2, $3, $4}'";
+    match ssh::run_command(q.ssh_user.as_deref(), &q.host, cmd).await {
+        Ok(out) => {
+            let parts: Vec<u64> = out
+                .trim()
+                .split_whitespace()
+                .filter_map(|p| p.parse().ok())
+                .collect();
+            if parts.len() >= 3 {
+                Json(json!({"ok": true, "total_kb": parts[0], "used_kb": parts[1], "avail_kb": parts[2]}))
+            } else {
+                Json(json!({"ok": false, "error": "unexpected df output", "raw": out.trim()}))
+            }
+        }
+        Err(e) => Json(json!({"ok": false, "error": format!("{}", e)})),
+    }
+}
+
+/// GET /machines/docker?host=HOST&ssh_user=USER
+/// Returns `docker system df --format '{{json .}}'` parsed as a JSON array.
+async fn machine_docker(Query(q): Query<MachineQuery>) -> Json<serde_json::Value> {
+    let cmd = "docker system df --format '{{json .}}' 2>/dev/null";
+    match ssh::run_command(q.ssh_user.as_deref(), &q.host, cmd).await {
+        Ok(out) => {
+            let items: Vec<serde_json::Value> = out
+                .lines()
+                .filter_map(|l| serde_json::from_str(l.trim()).ok())
+                .collect();
+            Json(json!({"ok": true, "items": items}))
+        }
+        Err(e) => Json(json!({"ok": false, "error": format!("{}", e)})),
+    }
+}
+
 // Note: handlers for commands/logs/reload are defined as closures in `main`
 // because using top-level functions with multiple extractors caused Handler
 // trait mismatches in some environments. Topology and list endpoints remain simple.
@@ -141,13 +184,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     let config_path = std::env::args().nth(1).unwrap_or_else(|| "config/services.example.yaml".to_string());
-    let initial_services = match config::load_services_from_file(&config_path) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("Failed to load config {}: {}", config_path, e);
-            Vec::new()
-        }
-    };
+    // Load main config + auto-merge any previously-discovered YAML files
+    let initial_services = config::load_all_services(&config_path);
     let pref_path = "config/preferences.yaml";
     let initial_prefs = match config::load_preferences_from_file(pref_path) {
         Ok(p) => p,
@@ -264,13 +302,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut ok = true;
             let mut error = String::new();
             
-            // Reload services
-            match config::load_services_from_file(&config_path) {
-                Ok(new) => {
-                    let mut s = state.services.write().await;
-                    *s = new;
-                }
-                Err(e) => { ok = false; error = format!("services: {}", e); }
+            // Reload services (main config + discovered files)
+            {
+                let new = config::load_all_services(&config_path);
+                let mut s = state.services.write().await;
+                *s = new;
             }
             
             // Reload preferences
@@ -478,6 +514,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let snapshot = json!({"type": "full_state", "services": &*s}).to_string();
                         let _ = state.broadcaster.send(snapshot);
                     }
+                    // Persist all discovered services for this host to config/discovered/<host>.yaml
+                    {
+                        let s = state.services.read().await;
+                        let host_services: Vec<_> = s
+                            .iter()
+                            .filter(|svc| svc.host == body.host && svc.discovered)
+                            .cloned()
+                            .collect();
+                        config::save_discovered_services(&body.host, &host_services);
+                    }
                     axum::Json(json!({"ok": true, "discovered": count, "services": new_services}))
                 }
                 Err(e) => axum::Json(json!({"ok": false, "error": format!("{}", e)})),
@@ -500,6 +546,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // POST /machines/forget — remove all services for a host and delete its discovered file
+    #[derive(serde::Deserialize)]
+    struct ForgetReq { host: String }
+
+    let state_for_forget = state.clone();
+    let forget_route = post(move |req: axum::http::Request<axum::body::Body>| {
+        let state = state_for_forget.clone();
+        async move {
+            let bytes = match hyper::body::to_bytes(req.into_body()).await {
+                Ok(b) => b,
+                Err(_) => return axum::Json(json!({"ok": false, "error": "failed to read body"})),
+            };
+            let body: ForgetReq = match serde_json::from_slice(&bytes) {
+                Ok(b) => b,
+                Err(_) => return axum::Json(json!({"ok": false, "error": "invalid json — expected {host}"})),
+            };
+            {
+                let mut s = state.services.write().await;
+                s.retain(|svc| svc.host != body.host);
+            }
+            // Remove the persisted discovered file so it won't be reloaded
+            config::forget_discovered_host(&body.host);
+            // Broadcast updated state
+            {
+                let s = state.services.read().await;
+                let snapshot = json!({"type": "full_state", "services": &*s}).to_string();
+                let _ = state.broadcaster.send(snapshot);
+            }
+            axum::Json(json!({"ok": true}))
+        }
+    });
+
     let app = Router::new()
         .route("/", get(|| async { Html(include_str!("../web/index.html")) }))
         .route("/services", get(list_services))
@@ -515,10 +593,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/topology", topo_route)
         .route("/discover", discover_route)
         .route("/discover/hosts", discover_hosts_route)
+        .route("/machines/disk", get(machine_disk))
+        .route("/machines/docker", get(machine_docker))
+        .route("/machines/forget", forget_route)
         .route("/health", get(health))
         .layer(Extension(state));
     let addr = std::net::SocketAddr::from(([127,0,0,1], 8080));
     tracing::info!("Rustboard listening on {}", addr);
+
+    // Open the dashboard in the default browser shortly after binding.
+    // Runs in background so it doesn't block the server from starting.
+    tokio::spawn(async {
+        // Give the server a moment to finish binding before opening the browser.
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        let url = "http://127.0.0.1:8080";
+        #[cfg(target_os = "windows")]
+        let _ = tokio::process::Command::new("cmd").args(["/c", "start", url]).spawn();
+        #[cfg(target_os = "macos")]
+        let _ = tokio::process::Command::new("open").arg(url).spawn();
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let _ = tokio::process::Command::new("xdg-open").arg(url).spawn();
+    });
+
     axum::Server::bind(&addr).serve(app.into_make_service()).await?;
     Ok(())
 }
