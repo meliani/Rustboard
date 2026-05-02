@@ -473,10 +473,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(b) => b,
                 Err(_) => return axum::Json(json!({"ok": false, "error": "invalid json"})),
             };
-            let plugin_path = plugin_dir.join(&body.name);
-            if !plugin_path.exists() {
-                return axum::Json(json!({"ok": false, "error": "plugin not found"}));
+            // Reject names with path separators to prevent directory traversal.
+            if body.name.contains('/') || body.name.contains('\\') || body.name.contains("..") {
+                return axum::Json(json!({"ok": false, "error": "invalid plugin name"}));
             }
+            // Resolve: try name as-is, then with .wasm extension (exec_plugin also does this,
+            // but we check early to return a cleaner error message).
+            let plugin_path = {
+                let base = plugin_dir.join(&body.name);
+                if base.exists() {
+                    base
+                } else {
+                    plugin_dir.join(format!("{}.wasm", body.name))
+                }
+            };
             let input_str = body.input.map(|v| v.to_string()).unwrap_or_default();
             match plugin::exec_plugin(&plugin_path, &input_str).await {
                 Ok(out) => axum::Json(json!({"ok": true, "output": out})),

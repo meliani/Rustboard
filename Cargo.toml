@@ -7,3 +7,10 @@ members = [
     "plugins",
     "plugin-openai-tester",
 ]
+# plugin-openai-tester must be built separately with --target wasm32-wasip1
+default-members = [
+    "core",
+    "cli",
+    "web",
+    "plugins",
+]

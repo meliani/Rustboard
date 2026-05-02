@@ -178,15 +178,26 @@
     .service-actions { display: flex; gap: 8px; flex-wrap: wrap; border-top: 1px solid var(--card-border); padding-top: 16px; }
 
     /* Topology */
-    #topology-view { height: calc(100vh - var(--header-height) - 100px); display: flex; flex-direction: column; }
+    #topology-view { height: calc(100vh - var(--header-height) - 60px); display: flex; flex-direction: column; gap: 10px; }
+    #topology-toolbar { display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
     #topology-container {
-      flex: 1; width: 100%;
+      flex: 1; width: 100%; position: relative; overflow: hidden;
       background: var(--card-bg); border-radius: 12px;
-      border: 1px solid var(--card-border); padding: 24px;
-      overflow: auto; box-sizing: border-box;
+      border: 1px solid var(--card-border); box-sizing: border-box;
+      cursor: grab; user-select: none;
     }
-    #topology-render { width: 100%; }
-    #topology-render svg { width: 100% !important; max-width: 100% !important; height: auto !important; display: block; }
+    #topology-container.dragging { cursor: grabbing; }
+    #topo-stage { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+    #topology-render { padding: 32px; }
+    #topology-render svg { display: block; }
+    .topo-btn {
+      background: var(--card-bg); border: 1px solid var(--card-border);
+      color: var(--text-main); padding: 6px 12px; border-radius: var(--radius);
+      cursor: pointer; font-size: 13px; display: flex; align-items: center; gap: 6px;
+      transition: border-color .15s, color .15s;
+    }
+    .topo-btn:hover { border-color: var(--accent); color: var(--accent); }
+    #topo-zoom-label { color: var(--text-dim); font-size: 12px; min-width: 38px; text-align: center; }
 
     /* Plugin */
     .plugin-view { max-width: 900px; margin: 0 auto; }
@@ -402,10 +413,18 @@
     <!-- Topology View -->
     <section id="view-topology" class="content-area">
       <div id="topology-view">
-        <div style="margin-bottom: 20px; display: flex; justify-content: flex-end;">
-          <button id="topology-refresh" class="primary"><i data-lucide="refresh-ccw"></i> Regenerate Graph</button>
+        <div id="topology-toolbar">
+          <div style="display:flex;gap:6px;align-items:center;">
+            <button class="topo-btn" id="topo-zoom-in"  title="Zoom in" ><i data-lucide="plus"       style="width:14px"></i></button>
+            <button class="topo-btn" id="topo-zoom-out" title="Zoom out"><i data-lucide="minus"      style="width:14px"></i></button>
+            <button class="topo-btn" id="topo-zoom-fit" title="Fit all" ><i data-lucide="maximize-2" style="width:14px"></i> Fit</button>
+            <span id="topo-zoom-label">100%</span>
+          </div>
+          <button id="topology-refresh" class="primary"><i data-lucide="refresh-ccw"></i> Regenerate</button>
         </div>
-        <div id="topology-container"><div id="topology-render"></div></div>
+        <div id="topology-container">
+          <div id="topo-stage"><div id="topology-render"></div></div>
+        </div>
       </div>
     </section>
 
@@ -521,7 +540,10 @@
 
   <script src="https://cdn.jsdelivr.net/npm/mermaid@10.2.3/dist/mermaid.min.js"></script>
   <script>
-    mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+    mermaid.initialize({
+      startOnLoad: false, theme: 'dark', securityLevel: 'loose',
+      flowchart: { nodeSpacing: 80, rankSpacing: 120, curve: 'basis', padding: 24 }
+    });
   </script>
   <script>
     // ─── App State ─────────────────────────────────────────────────────────────
@@ -929,7 +951,66 @@
       renderServices(j.services || []);
     }
 
-    // ─── Topology ───────────────────────────────────────────────────────────────
+    // ─── Topology zoom / pan state ─────────────────────────────────────────────
+    let _tScale = 1, _tTX = 0, _tTY = 0;
+    let _tDragging = false, _tDragOrigin = { x: 0, y: 0 };
+
+    function _tApply() {
+      const stage = document.getElementById('topo-stage');
+      if (stage) stage.style.transform = `translate(${_tTX}px,${_tTY}px) scale(${_tScale})`;
+      const lbl = document.getElementById('topo-zoom-label');
+      if (lbl) lbl.textContent = Math.round(_tScale * 100) + '%';
+    }
+
+    function _tFit() {
+      const container = document.getElementById('topology-container');
+      const stage     = document.getElementById('topo-stage');
+      if (!container || !stage) return;
+      stage.style.transform = 'none';
+      const sw = stage.offsetWidth, sh = stage.offsetHeight;
+      const cw = container.clientWidth,  ch = container.clientHeight;
+      if (!sw || !sh) return;
+      const pad = 56;
+      _tScale = Math.min((cw - pad) / sw, (ch - pad) / sh, 2);
+      _tTX = (cw - sw * _tScale) / 2;
+      _tTY = (ch - sh * _tScale) / 2;
+      _tApply();
+    }
+
+    document.getElementById('topo-zoom-in') .onclick = () => { _tScale = Math.min(_tScale * 1.25, 5); _tApply(); };
+    document.getElementById('topo-zoom-out').onclick = () => { _tScale = Math.max(_tScale * 0.8, 0.08); _tApply(); };
+    document.getElementById('topo-zoom-fit').onclick = _tFit;
+
+    (() => {
+      const tc = document.getElementById('topology-container');
+      tc.addEventListener('wheel', e => {
+        e.preventDefault();
+        const rect  = tc.getBoundingClientRect();
+        const mx    = e.clientX - rect.left, my = e.clientY - rect.top;
+        const delta = e.deltaY < 0 ? 1.12 : 0.89;
+        _tTX    = mx - (mx - _tTX) * delta;
+        _tTY    = my - (my - _tTY) * delta;
+        _tScale = Math.min(Math.max(_tScale * delta, 0.08), 5);
+        _tApply();
+      }, { passive: false });
+      tc.addEventListener('mousedown', e => {
+        _tDragging = true;
+        _tDragOrigin = { x: e.clientX - _tTX, y: e.clientY - _tTY };
+        tc.classList.add('dragging');
+      });
+      window.addEventListener('mousemove', e => {
+        if (!_tDragging) return;
+        _tTX = e.clientX - _tDragOrigin.x;
+        _tTY = e.clientY - _tDragOrigin.y;
+        _tApply();
+      });
+      window.addEventListener('mouseup', () => {
+        _tDragging = false;
+        document.getElementById('topology-container')?.classList.remove('dragging');
+      });
+    })();
+
+    // ─── Topology render ────────────────────────────────────────────────────────
     async function refreshTopology() {
       const container = document.getElementById('topology-render');
       container.innerHTML = '<div class="pulse">Generating dependency graph...</div>';
@@ -938,57 +1019,44 @@
         const nodes = j.nodes || [], edges = j.edges || [];
 
         if (!nodes.length) {
-          container.innerHTML = '<div style="color:var(--text-dim);text-align:center;">No services configured.</div>';
+          container.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:32px;">No services configured.</div>';
           return;
         }
 
-        // Sanitize IDs: Mermaid requires alphanumeric bare identifiers
+        // Mermaid requires alphanumeric bare node IDs
         const safeId = id => 'n_' + id.replace(/[^a-zA-Z0-9]/g, '_');
 
-        // Use LR layout so many nodes spread horizontally instead of stacking tiny
         let g = 'graph LR\n';
-        g += '  classDef dflt fill:#161b22,stroke:#30363d,color:#c9d1d9\n';
-        g += '  classDef running fill:#1a3a1f,stroke:#3fb950,color:#3fb950\n';
+        g += '  classDef dflt    fill:#1a1f2e,stroke:#30363d,color:#c9d1d9,rx:6\n';
+        g += '  classDef running fill:#1a3a1f,stroke:#3fb950,color:#3fb950,rx:6\n';
 
-        // Only draw nodes that have at least one edge (to/from); draw the rest after
         const connectedIds = new Set(edges.flatMap(e => [e.from, e.to]));
-        const isolated = nodes.filter(n => !connectedIds.has(n));
-        const connected = nodes.filter(n => connectedIds.has(n));
+        const isolated     = nodes.filter(n => !connectedIds.has(n));
 
-        const nodeLine = n => {
+        // Emit edge lines with inline node labels (most reliable in mermaid v10)
+        edges.forEach(e => {
+          const lFrom = (services.find(x => x.id === e.from)?.name || e.from).replace(/"/g, "'");
+          const lTo   = (services.find(x => x.id === e.to  )?.name || e.to  ).replace(/"/g, "'");
+          g += `  ${safeId(e.from)}["${lFrom}"] --> ${safeId(e.to)}["${lTo}"]\n`;
+        });
+
+        // Apply classes after edges
+        [...connectedIds].forEach(n => {
+          const s = services.find(x => x.id === n);
+          g += `  class ${safeId(n)} ${s?.status === 'running' ? 'running' : 'dflt'}\n`;
+        });
+
+        // Isolated nodes (no dependencies)
+        isolated.forEach(n => {
           const s = services.find(x => x.id === n);
           const label = (s?.name || n).replace(/"/g, "'");
-          return `  ${safeId(n)}["${label}"]${s?.status === 'running' ? ':::running' : ':::dflt'}\n`;
-        };
+          g += `  ${safeId(n)}["${label}"]:::${s?.status === 'running' ? 'running' : 'dflt'}\n`;
+        });
 
-        // Emit edges first — Mermaid renders them with the nodes inline
-        if (edges.length) {
-          edges.forEach(e => {
-            const fromLabel = (() => { const s = services.find(x => x.id === e.from); return (s?.name || e.from).replace(/"/g, "'"); })();
-            const toLabel   = (() => { const s = services.find(x => x.id === e.to);   return (s?.name || e.to  ).replace(/"/g, "'"); })();
-            g += `  ${safeId(e.from)}["${fromLabel}"] --> ${safeId(e.to)}["${toLabel}"]\n`;
-          });
-          // Apply classes separately after edges
-          connected.forEach(n => {
-            const s = services.find(x => x.id === n);
-            if (s?.status === 'running') g += `  class ${safeId(n)} running\n`;
-            else g += `  class ${safeId(n)} dflt\n`;
-          });
-        } else {
-          nodes.forEach(n => { g += nodeLine(n); });
-        }
-
-        // Isolated nodes (no deps at all) in a subgraph
-        if (isolated.length) {
-          g += '  subgraph standalone[" "]\n';
-          isolated.forEach(n => { g += nodeLine(n); });
-          g += '  end\n';
-        }
-
-        // mermaid v10: render(id, text) returns Promise<{svg}>
-        const renderId = 'topo_' + Date.now();
-        const { svg } = await mermaid.render(renderId, g);
+        const { svg } = await mermaid.render('topo_' + Date.now(), g);
         container.innerHTML = svg;
+        // Auto-fit after DOM paints
+        requestAnimationFrame(() => requestAnimationFrame(_tFit));
       } catch (e) { container.innerHTML = `<div class="status-error">Failed to render topology: ${e}</div>`; }
     }
     document.getElementById('topology-refresh').onclick = refreshTopology;

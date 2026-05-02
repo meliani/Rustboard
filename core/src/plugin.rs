@@ -1,28 +1,8 @@
 use anyhow::{Context, Result};
 use std::path::Path;
-use std::{fs};
-use tokio::process::Command;
-use tokio::io::AsyncWriteExt;
+use std::fs;
 
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-
-#[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
-    match path.metadata() {
-        Ok(meta) => (meta.permissions().mode() & 0o111) != 0,
-        Err(_) => false,
-    }
-}
-
-#[cfg(windows)]
-fn is_executable(path: &Path) -> bool {
-    match path.extension().and_then(|s| s.to_str()) {
-        Some(ext) => matches!(ext.to_lowercase().as_str(), "exe" | "bat" | "cmd" | "ps1"),
-        None => false,
-    }
-}
-
+/// List all `.wasm` plugins in `dir`, returning their stem names (no extension).
 pub fn list_plugins_in(dir: &Path) -> Result<Vec<String>> {
     let mut res = Vec::new();
     if !dir.exists() {
@@ -31,36 +11,49 @@ pub fn list_plugins_in(dir: &Path) -> Result<Vec<String>> {
     for entry in fs::read_dir(dir).context("reading plugin directory")? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_file() && is_executable(&path) {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                res.push(name.to_string());
+        if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("wasm") {
+            if let Some(stem) = path.file_stem().and_then(|n| n.to_str()) {
+                res.push(stem.to_string());
             }
         }
     }
     Ok(res)
 }
 
+/// Load and execute a WASM plugin via Extism.
+///
+/// `path` may omit the `.wasm` extension — it will be resolved automatically.
+/// The plugin must export a function named `execute` that takes a JSON string
+/// and returns a JSON string (the same contract as the old stdin/stdout protocol).
 pub async fn exec_plugin(path: &Path, input: &str) -> Result<String> {
-    let mut cmd = Command::new(path);
-    let mut child = cmd
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .context("spawning plugin process")?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(input.as_bytes()).await.context("writing to plugin stdin")?;
-    }
-
-    let output = child.wait_with_output().await.context("waiting for plugin output")?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    let resolved = if path.exists() {
+        path.to_path_buf()
     } else {
-        let err = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(anyhow::anyhow!("plugin failed: {}", err))
-    }
-}
+        let with_ext = path.with_extension("wasm");
+        if with_ext.exists() {
+            with_ext
+        } else {
+            anyhow::bail!("plugin not found: {}", path.display());
+        }
+    };
 
+    let input = input.to_string();
+    tokio::task::spawn_blocking(move || {
+        let wasm = extism::Wasm::file(&resolved);
+        // Allow network access for plugins that make outbound HTTP calls.
+        // The plugin binary itself is sandboxed — it cannot access the filesystem
+        // or spawn processes unless explicitly granted here.
+        let manifest = extism::Manifest::new([wasm]).with_allowed_host("*");
+        let mut plugin = extism::Plugin::new(&manifest, [], true)
+            .context("loading WASM plugin")?;
+        let result: String = plugin
+            .call("execute", input.as_str())
+            .context("executing plugin function")?;
+        Ok(result)
+    })
+    .await
+    .context("plugin task panicked")?
+}
 
 #[cfg(test)]
 mod tests {
@@ -70,28 +63,24 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn list_plugins_detects_executable() {
+    fn list_plugins_detects_wasm() {
         let td = tempdir().expect("tempdir");
-        let mut file_path = td.path().join("dummy_plugin");
-        #[cfg(windows)]
-        {
-            file_path.set_extension("exe");
-        }
+        let file_path = td.path().join("dummy_plugin.wasm");
         let mut f = File::create(&file_path).expect("create");
-        writeln!(f, "echo hello").unwrap();
-        // Ensure executable bit on unix
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let metadata = std::fs::metadata(&file_path).expect("meta");
-            let mut perms = metadata.permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&file_path, perms).expect("set perms");
-        }
+        writeln!(f, "").unwrap();
 
         let list = list_plugins_in(td.path()).expect("list");
-        let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap();
-        assert!(list.iter().any(|n| n == file_name));
+        assert!(list.iter().any(|n| n == "dummy_plugin"));
+    }
+
+    #[test]
+    fn list_plugins_ignores_non_wasm() {
+        let td = tempdir().expect("tempdir");
+        let file_path = td.path().join("not_a_plugin.exe");
+        File::create(&file_path).expect("create");
+
+        let list = list_plugins_in(td.path()).expect("list");
+        assert!(list.is_empty());
     }
 
     #[tokio::test]
@@ -101,3 +90,4 @@ mod tests {
         assert!(res.is_err());
     }
 }
+

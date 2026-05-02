@@ -81,15 +81,14 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-${{ matrix.target }}-
 
       - name: Build release binaries
-        run: cargo build --release --target ${{ matrix.target }} -p core -p cli -p plugin-openai-tester
+        run: cargo build --release --target ${{ matrix.target }} -p core -p cli
 
       - name: Stage artifacts
         shell: bash
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/core${{ matrix.exe }}          dist/rustboard-core-${{ matrix.suffix }}${{ matrix.exe }}
-          cp target/${{ matrix.target }}/release/cli${{ matrix.exe }}            dist/rustboard-cli-${{ matrix.suffix }}${{ matrix.exe }}
-          cp target/${{ matrix.target }}/release/plugin-openai-tester${{ matrix.exe }} dist/plugin-openai-tester-${{ matrix.suffix }}${{ matrix.exe }}
+          cp target/${{ matrix.target }}/release/core${{ matrix.exe }}  dist/rustboard-core-${{ matrix.suffix }}${{ matrix.exe }}
+          cp target/${{ matrix.target }}/release/cli${{ matrix.exe }}   dist/rustboard-cli-${{ matrix.suffix }}${{ matrix.exe }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -97,9 +96,45 @@ jobs:
           name: rustboard-${{ matrix.suffix }}
           path: dist/
 
+  build-plugin:
+    name: Build WASM plugin
+    needs: auto-tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain + wasm32-wasip1 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ubuntu-cargo-wasm32-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ubuntu-cargo-wasm32-
+
+      - name: Build plugin-openai-tester WASM
+        run: cargo build --release -p plugin-openai-tester --target wasm32-wasip1
+
+      - name: Stage plugin artifact
+        run: |
+          mkdir -p dist
+          cp target/wasm32-wasip1/release/plugin_openai_tester.wasm dist/plugin-openai-tester.wasm
+
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustboard-plugins
+          path: dist/
+
   release:
     name: Create GitHub Release
-    needs: [auto-tag, build]
+    needs: [auto-tag, build, build-plugin]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -140,6 +175,15 @@ jobs:
             | `rustboard-core-windows-x86_64.exe` | Windows x86_64 |
             | `rustboard-core-macos-x86_64` | macOS Intel |
             | `rustboard-core-macos-aarch64` | macOS Apple Silicon |
+
+            ### Plugins
+            Plugins are cross-platform WebAssembly modules — one file runs on every OS.
+
+            | Plugin | Description |
+            |---|---|
+            | `plugin-openai-tester.wasm` | Tests OpenAI-compatible API keys |
+
+            Install a plugin by copying it to the `plugins/bin/` directory next to the `core` binary.
 
             ### Run
             ```bash
