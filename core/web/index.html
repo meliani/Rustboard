@@ -178,13 +178,15 @@
     .service-actions { display: flex; gap: 8px; flex-wrap: wrap; border-top: 1px solid var(--card-border); padding-top: 16px; }
 
     /* Topology */
-    #topology-view { height: calc(100vh - var(--header-height) - 100px); }
+    #topology-view { height: calc(100vh - var(--header-height) - 100px); display: flex; flex-direction: column; }
     #topology-container {
-      width: 100%; height: 100%;
+      flex: 1; width: 100%;
       background: var(--card-bg); border-radius: 12px;
-      border: 1px solid var(--card-border); padding: 40px;
-      display: flex; align-items: center; justify-content: center; overflow: auto;
+      border: 1px solid var(--card-border); padding: 24px;
+      overflow: auto; box-sizing: border-box;
     }
+    #topology-render { width: 100%; }
+    #topology-render svg { width: 100% !important; max-width: 100% !important; height: auto !important; display: block; }
 
     /* Plugin */
     .plugin-view { max-width: 900px; margin: 0 auto; }
@@ -936,31 +938,57 @@
         const nodes = j.nodes || [], edges = j.edges || [];
 
         if (!nodes.length) {
-          container.innerHTML = '<div style="color:var(--text-dim);text-align:center;">No services with dependencies configured.<br>Add a <code>dependencies</code> list to your services.yaml.</div>';
+          container.innerHTML = '<div style="color:var(--text-dim);text-align:center;">No services configured.</div>';
           return;
         }
 
-        // Mermaid bare node IDs must be alphanumeric; sanitize all special chars
+        // Sanitize IDs: Mermaid requires alphanumeric bare identifiers
         const safeId = id => 'n_' + id.replace(/[^a-zA-Z0-9]/g, '_');
 
-        let g = 'graph TD\n';
+        // Use LR layout so many nodes spread horizontally instead of stacking tiny
+        let g = 'graph LR\n';
         g += '  classDef dflt fill:#161b22,stroke:#30363d,color:#c9d1d9\n';
         g += '  classDef running fill:#1a3a1f,stroke:#3fb950,color:#3fb950\n';
 
-        nodes.forEach(n => {
+        // Only draw nodes that have at least one edge (to/from); draw the rest after
+        const connectedIds = new Set(edges.flatMap(e => [e.from, e.to]));
+        const isolated = nodes.filter(n => !connectedIds.has(n));
+        const connected = nodes.filter(n => connectedIds.has(n));
+
+        const nodeLine = n => {
           const s = services.find(x => x.id === n);
           const label = (s?.name || n).replace(/"/g, "'");
-          g += `  ${safeId(n)}["${label}"]${s?.status === 'running' ? ':::running' : ':::dflt'}\n`;
-        });
-        edges.forEach(e => { g += `  ${safeId(e.from)} --> ${safeId(e.to)}\n`; });
+          return `  ${safeId(n)}["${label}"]${s?.status === 'running' ? ':::running' : ':::dflt'}\n`;
+        };
+
+        // Emit edges first — Mermaid renders them with the nodes inline
+        if (edges.length) {
+          edges.forEach(e => {
+            const fromLabel = (() => { const s = services.find(x => x.id === e.from); return (s?.name || e.from).replace(/"/g, "'"); })();
+            const toLabel   = (() => { const s = services.find(x => x.id === e.to);   return (s?.name || e.to  ).replace(/"/g, "'"); })();
+            g += `  ${safeId(e.from)}["${fromLabel}"] --> ${safeId(e.to)}["${toLabel}"]\n`;
+          });
+          // Apply classes separately after edges
+          connected.forEach(n => {
+            const s = services.find(x => x.id === n);
+            if (s?.status === 'running') g += `  class ${safeId(n)} running\n`;
+            else g += `  class ${safeId(n)} dflt\n`;
+          });
+        } else {
+          nodes.forEach(n => { g += nodeLine(n); });
+        }
+
+        // Isolated nodes (no deps at all) in a subgraph
+        if (isolated.length) {
+          g += '  subgraph standalone[" "]\n';
+          isolated.forEach(n => { g += nodeLine(n); });
+          g += '  end\n';
+        }
 
         // mermaid v10: render(id, text) returns Promise<{svg}>
         const renderId = 'topo_' + Date.now();
         const { svg } = await mermaid.render(renderId, g);
         container.innerHTML = svg;
-        // Ensure SVG fills the available width
-        const svgEl = container.querySelector('svg');
-        if (svgEl) { svgEl.style.width = '100%'; svgEl.style.maxWidth = '100%'; svgEl.style.height = 'auto'; }
       } catch (e) { container.innerHTML = `<div class="status-error">Failed to render topology: ${e}</div>`; }
     }
     document.getElementById('topology-refresh').onclick = refreshTopology;
