@@ -519,6 +519,9 @@
 
   <script src="https://cdn.jsdelivr.net/npm/mermaid@10.2.3/dist/mermaid.min.js"></script>
   <script>
+    mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+  </script>
+  <script>
     // ─── App State ─────────────────────────────────────────────────────────────
     let services = [];
     let filteredServices = [];
@@ -932,26 +935,33 @@
         const j = await (await fetch('/topology')).json();
         const nodes = j.nodes || [], edges = j.edges || [];
 
+        if (!nodes.length) {
+          container.innerHTML = '<div style="color:var(--text-dim);text-align:center;">No services with dependencies configured.<br>Add a <code>dependencies</code> list to your services.yaml.</div>';
+          return;
+        }
+
         // Mermaid bare node IDs must be alphanumeric; sanitize all special chars
         const safeId = id => 'n_' + id.replace(/[^a-zA-Z0-9]/g, '_');
 
-        // classDef: no rgba() — commas inside break the parser; use hex instead
         let g = 'graph TD\n';
-        g += '  classDef default fill:#161b22,stroke:#30363d,color:#c9d1d9\n';
+        g += '  classDef dflt fill:#161b22,stroke:#30363d,color:#c9d1d9\n';
         g += '  classDef running fill:#1a3a1f,stroke:#3fb950,color:#3fb950\n';
 
         nodes.forEach(n => {
           const s = services.find(x => x.id === n);
           const label = (s?.name || n).replace(/"/g, "'");
-          g += `  ${safeId(n)}["${label}"]${s?.status === 'running' ? ':::running' : ''}\n`;
+          g += `  ${safeId(n)}["${label}"]${s?.status === 'running' ? ':::running' : ':::dflt'}\n`;
         });
         edges.forEach(e => { g += `  ${safeId(e.from)} --> ${safeId(e.to)}\n`; });
 
-        // mermaid.render() is the correct v10 API (returns Promise<{svg}>)
+        // mermaid v10: render(id, text) returns Promise<{svg}>
         const renderId = 'topo_' + Date.now();
         const { svg } = await mermaid.render(renderId, g);
         container.innerHTML = svg;
-      } catch (e) { container.innerHTML = `<div class="status-error">Failed: ${e}</div>`; }
+        // Ensure SVG fills the available width
+        const svgEl = container.querySelector('svg');
+        if (svgEl) { svgEl.style.width = '100%'; svgEl.style.maxWidth = '100%'; svgEl.style.height = 'auto'; }
+      } catch (e) { container.innerHTML = `<div class="status-error">Failed to render topology: ${e}</div>`; }
     }
     document.getElementById('topology-refresh').onclick = refreshTopology;
 
