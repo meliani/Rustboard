@@ -1,4 +1,4 @@
-[![Release](https://github.com/meliani/Rustboard/actions/workflows/release.yml/badge.svg)](https://github.com/meliani/Rustboard/actions/workflows/release.yml)
+[![Release](https://github.com/meliani/Rustboard/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/meliani/Rustboard/actions/workflows/release.yml)
 # Rustboard
 
 **Rustboard** is a lightweight, open-source microservices dashboard built in Rust — combining a real-time web UI, a CLI, and an extensible plugin system to monitor and manage services across your LAN over SSH.
