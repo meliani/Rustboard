@@ -1,5 +1,5 @@
 # install-plugin-openai-tester.ps1
-# Builds the plugin and installs it into the plugins/ directory so the
+# Builds the plugin and installs it into the plugins/bin/ directory so the
 # dashboard can discover and invoke it.
 #
 # Usage:

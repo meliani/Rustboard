@@ -237,8 +237,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Plugin directory (can be overridden with PLUGIN_DIR env var)
-    let plugin_dir: PathBuf = std::env::var("PLUGIN_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("plugins"));
+    // Plugin directory (can be overridden with PLUGIN_DIR env var).
+    // Default is plugins/bin — the Cargo `plugins/` crate dir is not the binary drop folder.
+    let plugin_dir: PathBuf = std::env::var("PLUGIN_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("plugins/bin"));
 
     // Create routes as closures that capture `state` to avoid Handler trait issues
     let state_for_cmd = state.clone();
