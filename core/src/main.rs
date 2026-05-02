@@ -238,8 +238,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Plugin directory (can be overridden with PLUGIN_DIR env var).
-    // Default is plugins/bin — the Cargo `plugins/` crate dir is not the binary drop folder.
-    let plugin_dir: PathBuf = std::env::var("PLUGIN_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("plugins/bin"));
+    // When deployed, plugins live in bin/ next to the executable.
+    // When running from source (cargo run), fall back to plugins/bin relative to the workspace root.
+    let plugin_dir: PathBuf = std::env::var("PLUGIN_DIR").map(PathBuf::from).unwrap_or_else(|_| {
+        let exe_adjacent_bin = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("bin")));
+        if let Some(ref d) = exe_adjacent_bin {
+            if d.is_dir() {
+                return d.clone();
+            }
+        }
+        PathBuf::from("plugins/bin")
+    });
 
     // Create routes as closures that capture `state` to avoid Handler trait issues
     let state_for_cmd = state.clone();
