@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::path::PathBuf;
 use std::convert::Infallible;
-use axum::{routing::{get, post}, Router, Json, extract::{Extension, Query}};
+use axum::{routing::{get, post}, Router, Json, extract::{Extension, Query, Path}};
 use axum::response::sse::{Sse, Event};
 use axum::response::Html;
 use axum::extract::ws::{WebSocketUpgrade, Message, WebSocket};
@@ -19,10 +19,49 @@ mod plugin;
 mod discover;
 use service::Service;
 
+// ── Job tracking ──────────────────────────────────────────────────────────────
+
+/// A background execution job — created by `POST /services/exec`.
+#[derive(Debug, Clone, serde::Serialize)]
+struct Job {
+    id:           String,
+    service_id:   String,
+    cmd:          String,
+    /// `"running"` | `"done"` | `"failed"`
+    state:        String,
+    /// Accumulated output lines (capped at 10 000 to bound memory).
+    output:       Vec<String>,
+    exit_code:    Option<i32>,
+    started_at:   u64,   // ms since Unix epoch
+    finished_at:  Option<u64>,
+}
+
+/// Returns a unique job ID based on wall-clock time + a monotonic counter.
+fn gen_job_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CTR: AtomicU64 = AtomicU64::new(0);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let n = CTR.fetch_add(1, Ordering::Relaxed);
+    format!("{:013x}{:03x}", ts, n & 0xfff)
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 struct AppState {
-    services: RwLock<Vec<Service>>,
+    services:    RwLock<Vec<Service>>,
     preferences: RwLock<config::Preferences>,
     broadcaster: broadcast::Sender<String>,
+    jobs:        RwLock<std::collections::HashMap<String, Job>>,
 }
 
 type SharedState = Arc<AppState>;
@@ -197,9 +236,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // broadcast channel for server-sent events
     let (bcast_tx, _bcast_rx) = broadcast::channel::<String>(64);
     let state: SharedState = Arc::new(AppState { 
-        services: RwLock::new(initial_services), 
+        services:    RwLock::new(initial_services), 
         preferences: RwLock::new(initial_prefs),
-        broadcaster: bcast_tx.clone() 
+        broadcaster: bcast_tx.clone(),
+        jobs:        RwLock::new(std::collections::HashMap::new()),
     });
 
     // Background health check worker
@@ -600,6 +640,122 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // ── POST /services/exec ────────────────────────────────────────────────────
+    // Starts a background job that streams command output via the broadcast
+    // channel.  Returns {ok, job_id} immediately so the caller can subscribe to
+    // `job_output` / `job_done` WebSocket events without blocking.
+    #[derive(serde::Deserialize)]
+    struct ExecReq { id: String, cmd: String }
+
+    let state_for_exec = state.clone();
+    let exec_route = post(move |req: axum::http::Request<axum::body::Body>| {
+        let state = state_for_exec.clone();
+        async move {
+            let bytes = match hyper::body::to_bytes(req.into_body()).await {
+                Ok(b) => b,
+                Err(_) => return axum::Json(json!({"ok": false, "error": "failed to read body"})),
+            };
+            let body: ExecReq = match serde_json::from_slice(&bytes) {
+                Ok(b) => b,
+                Err(_) => return axum::Json(json!({"ok": false, "error": "invalid json — expected {id, cmd}"})),
+            };
+
+            // Resolve host / ssh_user while holding a read lock only
+            let (host, ssh_user) = {
+                let services = state.services.read().await;
+                match services.iter().find(|s| s.id == body.id) {
+                    Some(s) => (s.host.clone(), s.ssh_user.clone()),
+                    None    => return axum::Json(json!({"ok": false, "error": "service not found"})),
+                }
+            };
+
+            // Create the job record
+            let job_id = gen_job_id();
+            {
+                let mut jobs = state.jobs.write().await;
+                jobs.insert(job_id.clone(), Job {
+                    id:          job_id.clone(),
+                    service_id:  body.id.clone(),
+                    cmd:         body.cmd.clone(),
+                    state:       "running".to_string(),
+                    output:      Vec::new(),
+                    exit_code:   None,
+                    started_at:  now_millis(),
+                    finished_at: None,
+                });
+            }
+
+            // Spawn background worker: stream output → job store + broadcast
+            let state_bg = state.clone();
+            let jid      = job_id.clone();
+            let cmd      = body.cmd.clone();
+            tokio::spawn(async move {
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(1024);
+
+                // Collector task: receives lines, appends to job, broadcasts them
+                let state2 = state_bg.clone();
+                let jid2   = jid.clone();
+                let collector = tokio::spawn(async move {
+                    while let Some(line) = rx.recv().await {
+                        {
+                            let mut jobs = state2.jobs.write().await;
+                            if let Some(j) = jobs.get_mut(&jid2) {
+                                j.output.push(line.clone());
+                                // Bound memory: keep at most 10 000 lines
+                                if j.output.len() > 10_000 {
+                                    j.output.remove(0);
+                                }
+                            }
+                        }
+                        let _ = state2.broadcaster.send(
+                            json!({"type": "job_output", "job_id": &jid2, "line": line}).to_string()
+                        );
+                    }
+                });
+
+                // Run the SSH command; each line is forwarded via `tx`
+                let exit_code = ssh::run_command_streaming(
+                    ssh_user.as_deref(), &host, &cmd, tx,
+                ).await.unwrap_or(-1);
+
+                // Drain the collector before marking the job finished
+                let _ = collector.await;
+
+                // Finalise job state
+                {
+                    let mut jobs = state_bg.jobs.write().await;
+                    if let Some(j) = jobs.get_mut(&jid) {
+                        j.state       = if exit_code == 0 { "done".to_string() }
+                                        else              { "failed".to_string() };
+                        j.exit_code   = Some(exit_code);
+                        j.finished_at = Some(now_millis());
+                    }
+                }
+
+                // Broadcast completion event so the UI knows the command finished
+                let _ = state_bg.broadcaster.send(
+                    json!({"type": "job_done", "job_id": &jid, "exit_code": exit_code}).to_string()
+                );
+            });
+
+            axum::Json(json!({"ok": true, "job_id": job_id}))
+        }
+    });
+
+    // ── GET /jobs/:id ──────────────────────────────────────────────────────────
+    // Fetch a full job snapshot — useful for late joiners that missed WS events.
+    let state_for_jobs = state.clone();
+    let job_get_route = get(move |Path(job_id): Path<String>| {
+        let state = state_for_jobs.clone();
+        async move {
+            let jobs = state.jobs.read().await;
+            match jobs.get(&job_id) {
+                Some(j) => axum::Json(json!({"ok": true,  "job": j})),
+                None    => axum::Json(json!({"ok": false, "error": "job not found"})),
+            }
+        }
+    });
+
     let app = Router::new()
         .route("/", get(|| async { Html(include_str!("../web/index.html")) }))
         .route("/services", get(list_services))
@@ -608,6 +764,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/services/cmd", cmd_route)
         .route("/services/quick", quick_exec_route)
         .route("/services/logs", logs_route)
+        .route("/services/exec", exec_route)
+        .route("/jobs/:id", job_get_route)
         .route("/config/reload", reload_route)
         .route("/preferences", prefs_route)
         .route("/plugins", plugins_route)

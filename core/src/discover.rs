@@ -92,8 +92,10 @@ pub async fn discover_docker_services(
         let short_id = entry.id.clone().unwrap_or_default();
         let short_id = short_id.trim().to_string();
 
-        // Build log and control commands using the container name
-        let log_cmd = format!("docker logs {} 2>&1 | tail -n 200", container_name);
+        // Build log and control commands using the container name.
+        // Use --tail to ask the Docker daemon to only return the last N lines
+        // (much more efficient than piping all output through `tail`).
+        let log_cmd = format!("docker logs --tail 200 {} 2>&1", container_name);
         let start_cmd = format!("docker start {}", container_name);
         let stop_cmd = format!("docker stop {}", container_name);
         let restart_cmd = format!("docker restart {}", container_name);

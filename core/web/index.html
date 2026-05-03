@@ -234,9 +234,28 @@
     .log-line { border-left: 2px solid #333; padding-left: 10px; margin-bottom: 2px; white-space: pre-wrap; word-break: break-all; }
     .log-line.error { border-left-color: var(--danger); color: #ffa3a3; }
     .log-line.hidden { display: none; }
+    .log-line.exec-cmd { border-left-color: var(--accent); color: var(--accent-hover); font-weight: 600; }
     .log-line mark { background: #d35400; color: white; border-radius: 2px; }
     .terminal-controls { display: flex; gap: 12px; align-items: center; }
     .log-search-input { background: #161b22; border: 1px solid var(--card-border); color: white; padding: 4px 12px; border-radius: 4px; font-size: 13px; width: 220px; }
+
+    /* Exec modal input */
+    .exec-cmd-input {
+      flex: 1; background: #0d1117; border: 1px solid var(--card-border);
+      color: var(--text-main); padding: 10px 14px; border-radius: var(--radius);
+      font-family: 'JetBrains Mono', monospace; font-size: 13px; outline: none;
+      transition: border-color 0.2s;
+    }
+    .exec-cmd-input:focus { border-color: var(--accent); }
+    .exec-quick-btn {
+      font-size: 12px; padding: 5px 10px; gap: 5px;
+      background: rgba(56,139,253,0.08); border-color: var(--info); color: var(--info);
+    }
+    .exec-quick-btn:hover { background: rgba(56,139,253,0.18); }
+    .exec-kill-btn {
+      background: rgba(218,54,51,0.15); border-color: var(--danger); color: var(--danger);
+    }
+    .exec-kill-btn:hover { background: rgba(218,54,51,0.28); }
 
     /* Discovery Drawer */
     .drawer-overlay {
@@ -488,6 +507,48 @@
     </div>
   </div>
 
+  <!-- Exec Modal -->
+  <div id="exec-modal" class="modal-overlay">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div>
+          <h3 style="margin:0" id="exec-service-name">Execute Command</h3>
+          <span id="exec-service-host" style="font-size:13px;color:var(--text-dim);"></span>
+        </div>
+        <button class="icon-only" id="close-exec"><i data-lucide="x"></i></button>
+      </div>
+      <!-- Quick commands + command input bar -->
+      <div style="padding:14px 24px;border-bottom:1px solid var(--card-border);display:flex;flex-direction:column;gap:10px;">
+        <div id="exec-quick-btns" style="display:flex;gap:8px;flex-wrap:wrap;min-height:0;"></div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input id="exec-cmd-input" class="exec-cmd-input" type="text" placeholder="Enter a shell command and press Enter or Run…"
+                 onkeydown="if(event.key==='Enter')submitExec()">
+          <button id="exec-run-btn" class="primary" onclick="submitExec()">
+            <i data-lucide="play" style="width:14px"></i> Run
+          </button>
+          <button id="exec-kill-btn" class="exec-kill-btn" style="display:none;" onclick="killExecJob()"
+                  data-tooltip="Disconnect from job — command may still run on server">
+            <i data-lucide="square" style="width:14px"></i> Kill
+          </button>
+        </div>
+      </div>
+      <div class="modal-body" style="background:#000;position:relative;">
+        <div id="exec-loading" style="position:absolute;inset:0;background:rgba(0,0,0,0.55);display:none;align-items:center;justify-content:center;z-index:10;flex-direction:column;gap:12px;">
+          <i data-lucide="loader-2" class="pulse" style="width:32px;height:32px;color:var(--accent);"></i>
+          <span style="font-size:13px;color:var(--text-dim);">Launching on remote host…</span>
+        </div>
+        <div class="terminal" id="exec-terminal"></div>
+      </div>
+      <div style="padding:10px 24px;background:rgba(0,0,0,0.2);border-top:1px solid var(--card-border);display:flex;justify-content:space-between;align-items:center;color:var(--text-dim);font-size:11px;">
+        <span id="exec-status">Ready</span>
+        <button class="icon-only" style="padding:4px;" data-tooltip="Clear terminal"
+                onclick="document.getElementById('exec-terminal').innerHTML=''">
+          <i data-lucide="trash-2" style="width:13px"></i>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Discovery Drawer -->
   <div id="discover-overlay" class="drawer-overlay">
     <div class="drawer">
@@ -632,6 +693,9 @@
             <button onclick="showLogs('${s.id}')" data-tooltip="View logs">
               <i data-lucide="terminal" style="width:14px"></i> Logs
             </button>
+            <button onclick="openExec('${s.id}')" data-tooltip="Execute command / quick commands" style="background:rgba(56,139,253,0.08);border-color:var(--info);color:var(--info);">
+              <i data-lucide="code-2" style="width:14px"></i> Exec
+            </button>
           </div>
         </div>`;
     }
@@ -745,11 +809,12 @@
     }
 
     // ─── Logs ───────────────────────────────────────────────────────────────────
-    let currentLogServiceId = null, currentLogLines = 200;
+    let currentLogServiceId = null, currentLogLines = 100;
     let isLiveLogs = false, liveLogsInterval = null, autoScroll = true;
+    let isFetchingLogs = false;  // guard against overlapping requests
 
     async function showLogs(id) {
-      if (currentLogServiceId !== id) { currentLogServiceId = id; currentLogLines = 200; }
+      if (currentLogServiceId !== id) { currentLogServiceId = id; currentLogLines = 100; }
       const service = services.find(s => s.id === id);
       if (!service) return;
       document.getElementById('log-service-name').textContent = `Logs: ${service.name}`;
@@ -763,6 +828,10 @@
 
     async function fetchLogs() {
       if (!currentLogServiceId) return;
+      // Skip if a fetch is already in-flight — prevents overlapping SSH calls
+      // that cause terminal flicker and double-fetching during live polling.
+      if (isFetchingLogs) return;
+      isFetchingLogs = true;
       document.getElementById('log-streaming-status').textContent = 'Fetching logs...';
       try {
         const res  = await fetch('/services/logs', {
@@ -776,12 +845,17 @@
           document.getElementById('log-streaming-status').textContent =
             isLiveLogs ? 'Live Polling Active (5s)' : 'Last fetch: ' + new Date().toLocaleTimeString();
         } else {
-          document.getElementById('log-terminal').innerHTML = `<div class="log-line error">Error: ${data.error}</div>`;
-          document.getElementById('log-streaming-status').textContent = 'Fetch failed';
+          // Don't wipe existing content on error — just update the status bar
+          document.getElementById('log-streaming-status').textContent =
+            `Error: ${data.error} — ${isLiveLogs ? 'retrying…' : 'check host'}`;
         }
       } catch (e) {
-        document.getElementById('log-terminal').innerHTML = `<div class="log-line error">Failed: ${e}</div>`;
-        document.getElementById('log-streaming-status').textContent = 'Network error';
+        // Network/SSH error: preserve existing terminal content, show status
+        document.getElementById('log-loading').style.display = 'none';
+        document.getElementById('log-streaming-status').textContent =
+          `Connection error: ${e.message || e} — ${isLiveLogs ? 'retrying…' : ''}`;
+      } finally {
+        isFetchingLogs = false;
       }
     }
 
@@ -806,7 +880,7 @@
       document.querySelectorAll('#log-terminal .log-line').forEach(l =>
         l.classList.toggle('hidden', !!q && !l.textContent.toLowerCase().includes(q)));
     });
-    document.getElementById('log-show-more').onclick = () => { currentLogLines += 200; fetchLogs(); };
+    document.getElementById('log-show-more').onclick = () => { currentLogLines += 500; fetchLogs(); };
     document.getElementById('log-download').onclick = () => {
       const text = [...document.querySelectorAll('#log-terminal .log-line')].map(l => l.textContent).join('\n');
       const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([text], { type: 'text/plain' })), download: `${currentLogServiceId}_logs.txt` });
@@ -931,8 +1005,10 @@
       ws.onmessage = e => {
         try {
           const d = JSON.parse(e.data);
-          if (d.type === 'full_state')    renderServices(d.services || []);
+          if (d.type === 'full_state')          renderServices(d.services || []);
           else if (d.type === 'service_update') updateService(d.service);
+          else if (d.type === 'job_output')     handleJobOutput(d);
+          else if (d.type === 'job_done')       handleJobDone(d);
         } catch (err) { console.error('WS:', err); }
       };
       ws.onclose = () => { document.getElementById('status-dot').style.background = 'var(--danger)'; document.getElementById('status-text').textContent = 'Disconnected - Retrying...'; setTimeout(initWS, 2000); };
@@ -1195,6 +1271,139 @@
         document.body.classList.toggle('no-tooltips', !preferences.show_tooltips);
       } catch (e) { console.error('Failed to fetch prefs', e); }
     }
+
+    // ─── Exec Modal ─────────────────────────────────────────────────────────────
+    let currentExecServiceId = null;
+    let currentJobId         = null;
+    let execAutoScroll       = true;
+
+    function openExec(id) {
+      currentExecServiceId = id;
+      currentJobId         = null;
+      const service = services.find(s => s.id === id);
+      if (!service) return;
+
+      document.getElementById('exec-service-name').textContent = `Exec: ${service.name}`;
+      document.getElementById('exec-service-host').textContent = service.host;
+      document.getElementById('exec-cmd-input').value = '';
+      document.getElementById('exec-terminal').innerHTML =
+        '<div class="log-line" style="color:var(--text-dim);">Ready — enter a command above or pick a preset below.</div>';
+      document.getElementById('exec-status').textContent = 'Ready';
+      document.getElementById('exec-loading').style.display = 'none';
+      document.getElementById('exec-run-btn').style.display  = '';
+      document.getElementById('exec-kill-btn').style.display = 'none';
+
+      // Render quick-command preset buttons
+      const quicks = service.quick_commands || [];
+      const container = document.getElementById('exec-quick-btns');
+      if (quicks.length) {
+        container.style.display = '';
+        container.innerHTML = quicks.map(q =>
+          `<button class="exec-quick-btn"
+              onclick="runExecQuick('${service.id}','${q.name.replace(/'/g,"\\'")}','${q.cmd.replace(/'/g,"\\'")}')"
+              data-tooltip="${(q.description || q.cmd).replace(/"/g,'&quot;')}">
+            <i data-lucide="zap" style="width:12px"></i> ${q.name}
+          </button>`
+        ).join('');
+      } else {
+        container.style.display = 'none';
+        container.innerHTML = '';
+      }
+      lucide.createIcons();
+
+      document.getElementById('exec-modal').classList.add('active');
+      setTimeout(() => document.getElementById('exec-cmd-input').focus(), 80);
+    }
+
+    function appendExecLine(text, cls = '') {
+      const term = document.getElementById('exec-terminal');
+      const esc  = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      term.insertAdjacentHTML('beforeend', `<div class="log-line ${cls}">${esc}</div>`);
+      if (execAutoScroll) term.scrollTop = term.scrollHeight;
+    }
+
+    function resetExecUI(status) {
+      document.getElementById('exec-loading').style.display  = 'none';
+      document.getElementById('exec-run-btn').style.display  = '';
+      document.getElementById('exec-kill-btn').style.display = 'none';
+      if (status) document.getElementById('exec-status').textContent = status;
+      currentJobId = null;
+    }
+
+    async function submitExec(overrideCmd) {
+      const id  = currentExecServiceId;
+      if (!id) return;
+      const cmd = (overrideCmd !== undefined ? overrideCmd : document.getElementById('exec-cmd-input').value).trim();
+      if (!cmd) return;
+
+      appendExecLine('$ ' + cmd, 'exec-cmd');
+      document.getElementById('exec-cmd-input').value = '';
+      document.getElementById('exec-loading').style.display  = 'flex';
+      document.getElementById('exec-run-btn').style.display  = 'none';
+      document.getElementById('exec-kill-btn').style.display = '';
+      document.getElementById('exec-status').textContent     = 'Running…';
+
+      try {
+        const res  = await fetch('/services/exec', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, cmd })
+        });
+        const data = await res.json();
+        document.getElementById('exec-loading').style.display = 'none';
+        if (data.ok) {
+          currentJobId = data.job_id;
+          document.getElementById('exec-status').textContent = `Job ${data.job_id.slice(-6)} running…`;
+        } else {
+          appendExecLine('Error: ' + (data.error || 'unknown'), 'error');
+          resetExecUI('Failed');
+        }
+      } catch (e) {
+        document.getElementById('exec-loading').style.display = 'none';
+        appendExecLine('Network error: ' + e, 'error');
+        resetExecUI('Network error');
+      }
+    }
+
+    function runExecQuick(serviceId, _name, cmd) {
+      // Open exec for the service if it isn't already open for that service
+      if (currentExecServiceId !== serviceId) openExec(serviceId);
+      submitExec(cmd);
+    }
+
+    function killExecJob() {
+      appendExecLine('[Disconnected from job — the command may still be running on the server]', 'error');
+      resetExecUI('Disconnected');
+    }
+
+    function handleJobOutput(d) {
+      if (d.job_id !== currentJobId) return;
+      appendExecLine(d.line);
+    }
+
+    function handleJobDone(d) {
+      if (d.job_id !== currentJobId) return;
+      const ok = d.exit_code === 0;
+      appendExecLine(
+        `─── Process exited with code ${d.exit_code} ───`,
+        ok ? '' : 'error'
+      );
+      resetExecUI(ok ? `Done  (exit 0)` : `Failed (exit ${d.exit_code})`);
+    }
+
+    document.getElementById('close-exec').onclick = () => {
+      document.getElementById('exec-modal').classList.remove('active');
+      resetExecUI('Ready');
+    };
+    document.getElementById('exec-modal').addEventListener('click', e => {
+      if (e.target === document.getElementById('exec-modal')) {
+        document.getElementById('exec-modal').classList.remove('active');
+        resetExecUI('Ready');
+      }
+    });
+    document.getElementById('exec-terminal').addEventListener('scroll', e => {
+      const t = e.target;
+      execAutoScroll = (t.scrollTop + t.offsetHeight) >= (t.scrollHeight - 20);
+    });
 
     // ─── Startup ────────────────────────────────────────────────────────────────
     initWS();
