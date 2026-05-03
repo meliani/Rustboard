@@ -506,7 +506,6 @@
             <button id="log-live-toggle" style="background: var(--card-bg); color: var(--text-dim); border-color: var(--card-border);">
               <i data-lucide="play" style="width:14px"></i> Live
             </button>
-            <button id="log-show-more" data-tooltip="Fetch 200 more lines"><i data-lucide="plus" style="width:14px"></i> More</button>
             <button id="log-download" class="icon-only" data-tooltip="Download logs"><i data-lucide="download"></i></button>
             <button id="log-clear" class="icon-only" data-tooltip="Clear view"><i data-lucide="trash-2"></i></button>
           </div>
@@ -832,6 +831,8 @@
     let currentLogServiceId = null, currentLogLines = 100;
     let isLiveLogs = false, liveLogsInterval = null, autoScroll = true;
     let isFetchingLogs = false;  // guard against overlapping requests
+    const LOG_HISTORY_STEP = 500;
+    const LOG_TOP_FETCH_THRESHOLD = 20;
 
     async function showLogs(id) {
       if (currentLogServiceId !== id) { currentLogServiceId = id; currentLogLines = 100; }
@@ -846,12 +847,15 @@
       await fetchLogs();
     }
 
-    async function fetchLogs() {
+    async function fetchLogs(options = {}) {
       if (!currentLogServiceId) return;
       // Skip if a fetch is already in-flight — prevents overlapping SSH calls
       // that cause terminal flicker and double-fetching during live polling.
       if (isFetchingLogs) return;
       isFetchingLogs = true;
+      const terminal = document.getElementById('log-terminal');
+      const prevScrollHeight = terminal.scrollHeight;
+      const prevScrollTop = terminal.scrollTop;
       document.getElementById('log-streaming-status').textContent = 'Fetching logs...';
       try {
         const res  = await fetch('/services/logs', {
@@ -861,7 +865,11 @@
         const data = await res.json();
         document.getElementById('log-loading').style.display = 'none';
         if (data.ok) {
-          renderLogs(data.logs);
+          renderLogs(data.logs, {
+            preserveViewport: !!options.preserveViewport,
+            prevScrollHeight,
+            prevScrollTop
+          });
           document.getElementById('log-streaming-status').textContent =
             isLiveLogs ? 'Live Polling Active (5s)' : 'Last fetch: ' + new Date().toLocaleTimeString();
         } else {
@@ -879,7 +887,7 @@
       }
     }
 
-    function renderLogs(logsText) {
+    function renderLogs(logsText, options = {}) {
       const terminal = document.getElementById('log-terminal');
       const query    = document.getElementById('log-search').value.toLowerCase();
       const lines    = logsText.split('\n');
@@ -891,6 +899,11 @@
         return `<div class="log-line ${isMatch ? '' : 'hidden'}">${content}</div>`;
       }).join('');
       document.getElementById('log-count').textContent = `${lines.length} lines`;
+      if (options.preserveViewport) {
+        const delta = terminal.scrollHeight - (options.prevScrollHeight || 0);
+        terminal.scrollTop = (options.prevScrollTop || 0) + delta;
+        return;
+      }
       if (autoScroll) terminal.scrollTop = terminal.scrollHeight;
     }
 
@@ -900,7 +913,6 @@
       document.querySelectorAll('#log-terminal .log-line').forEach(l =>
         l.classList.toggle('hidden', !!q && !l.textContent.toLowerCase().includes(q)));
     });
-    document.getElementById('log-show-more').onclick = () => { currentLogLines += 500; fetchLogs(); };
     document.getElementById('log-download').onclick = () => {
       const text = [...document.querySelectorAll('#log-terminal .log-line')].map(l => l.textContent).join('\n');
       const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([text], { type: 'text/plain' })), download: `${currentLogServiceId}_logs.txt` });
@@ -929,6 +941,10 @@
     document.getElementById('log-terminal').addEventListener('scroll', e => {
       const t = e.target;
       autoScroll = (t.scrollTop + t.offsetHeight) >= (t.scrollHeight - 20);
+      if (t.scrollTop <= LOG_TOP_FETCH_THRESHOLD && !isFetchingLogs) {
+        currentLogLines += LOG_HISTORY_STEP;
+        fetchLogs({ preserveViewport: true });
+      }
     });
 
     // ─── Discovery Drawer ───────────────────────────────────────────────────────
