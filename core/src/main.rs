@@ -277,6 +277,76 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Background auto-rediscovery worker — refreshes metadata for all previously-discovered
+    // containers every 60 s.  This ensures that after a `docker compose up --force-recreate`
+    // (or any redeploy that recreates containers), the dashboard picks up the new container_id
+    // and freshly-built log/start/stop commands automatically, without requiring a manual
+    // "Discover" click or an app restart.
+    let rediscover_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+
+            // Collect unique (host, ssh_user) pairs that have at least one discovered service.
+            let hosts: Vec<(String, Option<String>)> = {
+                let s = rediscover_state.services.read().await;
+                let mut seen = std::collections::HashSet::new();
+                let mut result = Vec::new();
+                for svc in s.iter().filter(|x| x.discovered) {
+                    let key = (svc.host.clone(), svc.ssh_user.clone());
+                    if seen.insert(key.clone()) {
+                        result.push(key);
+                    }
+                }
+                result
+            };
+
+            for (host, ssh_user) in hosts {
+                // Only skip YAML-configured services; rediscover all previously-discovered ones.
+                let static_ids: std::collections::HashSet<String> = {
+                    let s = rediscover_state.services.read().await;
+                    s.iter().filter(|x| !x.discovered).map(|x| x.id.clone()).collect()
+                };
+
+                match discover::discover_docker_services(&host, ssh_user.as_deref(), &static_ids).await {
+                    Ok(found) => {
+                        let mut changed = false;
+                        {
+                            let mut s = rediscover_state.services.write().await;
+                            for svc in found {
+                                if let Some(existing) = s.iter_mut().find(|x| x.id == svc.id && x.discovered) {
+                                    // Only overwrite (and flag as changed) if something meaningful differs.
+                                    if existing.container_id != svc.container_id || existing.status != svc.status {
+                                        *existing = svc;
+                                        changed = true;
+                                    }
+                                } else if !s.iter().any(|x| x.id == svc.id) {
+                                    s.push(svc);
+                                    changed = true;
+                                }
+                            }
+                        }
+                        if changed {
+                            let s = rediscover_state.services.read().await;
+                            let snapshot = json!({"type": "full_state", "services": &*s}).to_string();
+                            let _ = rediscover_state.broadcaster.send(snapshot);
+                            let host_services: Vec<_> = s
+                                .iter()
+                                .filter(|svc| svc.host == host && svc.discovered)
+                                .cloned()
+                                .collect();
+                            config::save_discovered_services(&host, &host_services);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("auto-rediscovery failed for {}: {}", host, e);
+                    }
+                }
+            }
+        }
+    });
+
     // Plugin directory (can be overridden with PLUGIN_DIR env var).
     // When deployed, plugins live in bin/ next to the executable.
     // When running from source (cargo run), fall back to plugins/bin relative to the workspace root.
@@ -552,23 +622,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(_) => return axum::Json(json!({"ok": false, "error": "invalid json — expected {host, ssh_user}"})),
             };
 
-            // Collect existing service ids so we don't duplicate
-            let existing_ids: std::collections::HashSet<String> = {
+            // Only skip YAML-configured (non-discovered) services to avoid overriding user
+            // config.  Previously-discovered services are always refreshed so that redeployed
+            // containers (same name, new container ID) get up-to-date metadata — container_id,
+            // log_cmd, start/stop/restart commands — without requiring an app restart.
+            let static_ids: std::collections::HashSet<String> = {
                 let s = state.services.read().await;
-                s.iter().map(|x| x.id.clone()).collect()
+                s.iter().filter(|x| !x.discovered).map(|x| x.id.clone()).collect()
             };
 
             match discover::discover_docker_services(
                 &body.host,
                 body.ssh_user.as_deref(),
-                &existing_ids,
+                &static_ids,
             ).await {
-                Ok(new_services) => {
-                    let count = new_services.len();
-                    // Merge into state
+                Ok(found_services) => {
+                    let mut new_count = 0usize;
+                    let mut updated_count = 0usize;
                     {
                         let mut s = state.services.write().await;
-                        s.extend(new_services.clone());
+                        for svc in found_services.clone() {
+                            if let Some(existing) = s.iter_mut().find(|x| x.id == svc.id && x.discovered) {
+                                // Refresh the existing discovered service with up-to-date metadata
+                                *existing = svc;
+                                updated_count += 1;
+                            } else if !s.iter().any(|x| x.id == svc.id) {
+                                s.push(svc);
+                                new_count += 1;
+                            }
+                        }
                     }
                     // Broadcast updated full state
                     {
@@ -586,7 +668,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .collect();
                         config::save_discovered_services(&body.host, &host_services);
                     }
-                    axum::Json(json!({"ok": true, "discovered": count, "services": new_services}))
+                    axum::Json(json!({
+                        "ok": true,
+                        "discovered": new_count,
+                        "updated": updated_count,
+                        "services": found_services
+                    }))
                 }
                 Err(e) => axum::Json(json!({"ok": false, "error": format!("{}", e)})),
             }
