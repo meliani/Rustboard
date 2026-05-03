@@ -342,6 +342,7 @@ Contributions are very welcome! Whether it's a bug fix, a new plugin, or documen
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | `services.yaml` field reference, environment variables |
 | [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Dev setup, testing, release workflow, PR checklist |
 | [docs/SECURITY.md](docs/SECURITY.md) | SSH security model, WASM sandboxing, threat model |
+| [docs/openapi.json](docs/openapi.json) | OpenAPI 3.1 machine-readable spec (import into Swagger UI, Insomnia, Postman, etc.) |
 
 ---
 

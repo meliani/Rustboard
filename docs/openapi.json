@@ -1,0 +1,923 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Rustboard API",
+    "description": "REST, SSE, and WebSocket API for the Rustboard microservices dashboard.\n\nAll request and response bodies are JSON. All responses include a top-level `ok` boolean.\nErrors return HTTP 200 with `{\"ok\": false, \"error\": \"...\"}` — HTTP 4xx/5xx are only returned for routing or body-parsing failures.",
+    "version": "0.1.0",
+    "license": {
+      "name": "MIT",
+      "url": "https://opensource.org/licenses/MIT"
+    },
+    "contact": {
+      "name": "Rustboard on GitHub",
+      "url": "https://github.com/meliani/Rustboard"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8080",
+      "description": "Default local server"
+    }
+  ],
+  "tags": [
+    { "name": "health",        "description": "Liveness probe" },
+    { "name": "services",      "description": "Service lifecycle and log management" },
+    { "name": "jobs",          "description": "Async background jobs" },
+    { "name": "discovery",     "description": "Docker container auto-discovery" },
+    { "name": "configuration", "description": "Config hot-reload and preferences" },
+    { "name": "topology",      "description": "Service dependency graph" },
+    { "name": "plugins",       "description": "WebAssembly plugin management and execution" },
+    { "name": "machines",      "description": "Remote host system metrics" },
+    { "name": "realtime",      "description": "Server-Sent Events and WebSocket streams" }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": ["health"],
+        "summary": "Liveness check",
+        "description": "Returns the plain-text string `ok`. Not JSON.",
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "Server is alive",
+            "content": {
+              "text/plain": {
+                "schema": { "type": "string", "example": "ok" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/services": {
+      "get": {
+        "tags": ["services"],
+        "summary": "List all services",
+        "description": "Returns every service known to the server — both YAML-defined and auto-discovered.",
+        "operationId": "listServices",
+        "responses": {
+          "200": {
+            "description": "Service list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "services": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/Service" }
+                    }
+                  },
+                  "required": ["services"]
+                },
+                "example": {
+                  "services": [
+                    {
+                      "id": "my-api",
+                      "name": "My API Server",
+                      "host": "10.0.2.10",
+                      "port": 3000,
+                      "ssh_user": "ubuntu",
+                      "status": "running",
+                      "tags": ["api", "production"],
+                      "stacks": ["my-project"],
+                      "dependencies": [],
+                      "discovered": false,
+                      "start_cmd": "systemctl start my-api",
+                      "stop_cmd": "systemctl stop my-api",
+                      "restart_cmd": "systemctl restart my-api",
+                      "log_path": "/var/log/my-api.log",
+                      "log_cmd": null,
+                      "health_cmd": null,
+                      "health_path": "/health",
+                      "container_name": null,
+                      "container_id": null,
+                      "image": null,
+                      "predicted_app_path": null,
+                      "quick_commands": [
+                        { "name": "shell", "cmd": "bash -l", "description": "Interactive shell", "in_container": false }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/services/cmd": {
+      "post": {
+        "tags": ["services"],
+        "summary": "Execute a lifecycle command",
+        "description": "Execute a start/stop/restart or custom command for a service via SSH. Broadcasts `service_update` to all SSE/WebSocket clients both when the command starts (optimistic) and when it completes.",
+        "operationId": "serviceCmd",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ServiceCmdRequest" },
+              "example": { "id": "my-api", "cmd": "restart" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Command result (success or SSH failure)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OkOutputResponse" },
+                "examples": {
+                  "success": {
+                    "value": { "ok": true, "output": "" }
+                  },
+                  "failure": {
+                    "value": { "ok": false, "error": "ssh failed: Connection refused" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/services/logs": {
+      "post": {
+        "tags": ["services"],
+        "summary": "Fetch service logs",
+        "description": "Fetch recent log lines for a service. Uses `log_cmd` if configured, otherwise falls back to `tail -n <lines> <log_path>`.",
+        "operationId": "serviceLogs",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ServiceLogsRequest" },
+              "example": { "id": "my-api", "lines": 200 }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Log output",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "ok":   { "type": "boolean", "enum": [true] },
+                        "logs": { "type": "string" }
+                      },
+                      "required": ["ok", "logs"]
+                    },
+                    { "$ref": "#/components/schemas/ErrorResponse" }
+                  ]
+                },
+                "examples": {
+                  "success": {
+                    "value": { "ok": true, "logs": "2024-01-01 10:00:00 INFO server started\n..." }
+                  },
+                  "noLogs": {
+                    "value": { "ok": false, "error": "no logs configured" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/services/quick": {
+      "post": {
+        "tags": ["services"],
+        "summary": "Execute a quick command",
+        "description": "Execute a named quick command for a service. If the quick command has `in_container: true` and the service has a `container_name`, the command is wrapped in `docker exec -it <container_name> <cmd>`.",
+        "operationId": "serviceQuick",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id":    { "type": "string", "description": "Service ID" },
+                  "quick": { "type": "string", "description": "Name of the quick command to execute" }
+                },
+                "required": ["id", "quick"]
+              },
+              "example": { "id": "my-api", "quick": "shell" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Command output",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OkOutputResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/services/exec": {
+      "post": {
+        "tags": ["services"],
+        "summary": "Submit async background job",
+        "description": "Submit a long-running command as a background job. Returns immediately with a job ID. Use `GET /services/jobs/:id` to poll status and output.",
+        "operationId": "serviceExec",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id":  { "type": "string", "description": "Service ID" },
+                  "cmd": { "type": "string", "description": "Shell command to run on the remote host via SSH" }
+                },
+                "required": ["id", "cmd"]
+              },
+              "example": { "id": "my-api", "cmd": "npm run migrate" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Job created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok":     { "type": "boolean", "enum": [true] },
+                    "job_id": { "type": "string" }
+                  },
+                  "required": ["ok", "job_id"]
+                },
+                "example": { "ok": true, "job_id": "018f3b2a4c1000abc" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/services/jobs": {
+      "get": {
+        "tags": ["jobs"],
+        "summary": "List all background jobs",
+        "description": "Returns all background jobs — both running and completed — sorted by start time descending.",
+        "operationId": "listJobs",
+        "responses": {
+          "200": {
+            "description": "Job list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok":   { "type": "boolean", "enum": [true] },
+                    "jobs": { "type": "array", "items": { "$ref": "#/components/schemas/Job" } }
+                  },
+                  "required": ["ok", "jobs"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/services/jobs/{id}": {
+      "get": {
+        "tags": ["jobs"],
+        "summary": "Get a single job",
+        "description": "Returns the full status and output of a background job by ID.",
+        "operationId": "getJob",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "Job ID returned by `POST /services/exec`"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "ok":  { "type": "boolean", "enum": [true] },
+                        "job": { "$ref": "#/components/schemas/Job" }
+                      },
+                      "required": ["ok", "job"]
+                    },
+                    { "$ref": "#/components/schemas/ErrorResponse" }
+                  ]
+                },
+                "examples": {
+                  "found":    { "value": { "ok": true, "job": { "id": "018f3b2a4c1000abc", "service_id": "my-api", "cmd": "npm run migrate", "state": "done", "output": ["Done."], "exit_code": 0, "started_at": 1715000000000, "finished_at": 1715000005200 } } },
+                  "notFound": { "value": { "ok": false, "error": "job not found" } }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/discover": {
+      "post": {
+        "tags": ["discovery"],
+        "summary": "Discover Docker containers on a remote host",
+        "description": "Trigger Docker container discovery on a remote host via SSH (`docker ps`). Discovered containers are merged into the service list and persisted to `config/discovered/<host>.yaml`. Broadcasts `full_state` to all clients on completion.",
+        "operationId": "discover",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/DiscoverRequest" },
+              "example": { "host": "10.0.2.10", "ssh_user": "ubuntu" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Discovery result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok":         { "type": "boolean", "enum": [true] },
+                    "discovered": { "type": "integer", "description": "Total containers found" },
+                    "new":        { "type": "integer", "description": "Newly added services" },
+                    "updated":    { "type": "integer", "description": "Existing services refreshed" }
+                  },
+                  "required": ["ok", "discovered", "new", "updated"]
+                },
+                "example": { "ok": true, "discovered": 5, "new": 3, "updated": 2 }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/discover/forget": {
+      "post": {
+        "tags": ["discovery"],
+        "summary": "Forget a discovered host",
+        "description": "Remove all discovered services for a host and delete the persisted `config/discovered/<host>.yaml` file.",
+        "operationId": "discoverForget",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "host": { "type": "string", "description": "Hostname or IP to remove" }
+                },
+                "required": ["host"]
+              },
+              "example": { "host": "10.0.2.10" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Host forgotten",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OkResponse" },
+                "example": { "ok": true }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/config/reload": {
+      "post": {
+        "tags": ["configuration"],
+        "summary": "Hot-reload configuration",
+        "description": "Re-read the service config from disk (main YAML + `config/discovered/*.yaml`) and reload `config/preferences.yaml`. Broadcasts `full_state` to all connected clients.",
+        "operationId": "configReload",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object" },
+              "example": {}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Config reloaded",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OkResponse" },
+                "example": { "ok": true }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/preferences": {
+      "get": {
+        "tags": ["configuration"],
+        "summary": "Get UI preferences",
+        "description": "Returns the current UI preferences from `config/preferences.yaml`.",
+        "operationId": "getPreferences",
+        "responses": {
+          "200": {
+            "description": "Preferences object",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Preferences" },
+                "example": { "show_tooltips": true, "theme": "dark" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/topology": {
+      "get": {
+        "tags": ["topology"],
+        "summary": "Get dependency graph",
+        "description": "Returns the service dependency graph as a node/edge list. Edges are derived from the `dependencies` array on each service.",
+        "operationId": "getTopology",
+        "responses": {
+          "200": {
+            "description": "Topology graph",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "nodes": {
+                      "type": "array",
+                      "items": { "type": "string" },
+                      "description": "Service IDs"
+                    },
+                    "edges": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/TopologyEdge" }
+                    }
+                  },
+                  "required": ["nodes", "edges"]
+                },
+                "example": {
+                  "nodes": ["my-api", "database", "cache"],
+                  "edges": [
+                    { "from": "my-api", "to": "database" },
+                    { "from": "my-api", "to": "cache" }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/plugins": {
+      "get": {
+        "tags": ["plugins"],
+        "summary": "List installed plugins",
+        "description": "Returns the stems (names without `.wasm`) of all `.wasm` files found in the plugin directory.",
+        "operationId": "listPlugins",
+        "responses": {
+          "200": {
+            "description": "Plugin names",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok":      { "type": "boolean", "enum": [true] },
+                    "plugins": { "type": "array", "items": { "type": "string" } }
+                  },
+                  "required": ["ok", "plugins"]
+                },
+                "example": { "ok": true, "plugins": ["plugin-openai-tester", "my-plugin"] }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/plugins/exec": {
+      "post": {
+        "tags": ["plugins"],
+        "summary": "Execute a plugin",
+        "description": "Load and execute a WebAssembly plugin by name. The `input` value is serialised to a string and passed to the plugin's `execute` function. The raw string returned by the plugin is in `output` — parse it client-side.\n\nPlugin names containing `/`, `\\`, or `..` are rejected to prevent path traversal.",
+        "operationId": "execPlugin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/PluginExecRequest" },
+              "example": {
+                "name": "plugin-openai-tester",
+                "input": { "api_key": "sk-...", "base_url": "https://api.openai.com/v1" }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Plugin execution result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "ok":     { "type": "boolean", "enum": [true] },
+                        "output": { "type": "string", "description": "Raw string returned by the plugin's execute function" }
+                      },
+                      "required": ["ok", "output"]
+                    },
+                    { "$ref": "#/components/schemas/ErrorResponse" }
+                  ]
+                },
+                "examples": {
+                  "success": {
+                    "value": { "ok": true, "output": "{\"ok\":true,\"valid\":true,\"models\":[\"gpt-4o\"]}" }
+                  },
+                  "notFound": {
+                    "value": { "ok": false, "error": "plugin not found: plugins/bin/my-plugin.wasm" }
+                  },
+                  "execError": {
+                    "value": { "ok": false, "error": "executing plugin function: ..." }
+                  },
+                  "invalidName": {
+                    "value": { "ok": false, "error": "invalid plugin name" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/machines/disk": {
+      "get": {
+        "tags": ["machines"],
+        "summary": "Remote disk usage",
+        "description": "Returns disk usage for `/` on a remote host via `df -k /` over SSH.",
+        "operationId": "machinesDisk",
+        "parameters": [
+          {
+            "name": "host",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "Hostname or IP of the remote machine",
+            "example": "10.0.2.10"
+          },
+          {
+            "name": "ssh_user",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "SSH username (defaults to the current user if omitted)",
+            "example": "ubuntu"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Disk usage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "ok":       { "type": "boolean", "enum": [true] },
+                        "total_kb": { "type": "integer", "description": "Total disk size in kilobytes" },
+                        "used_kb":  { "type": "integer", "description": "Used disk space in kilobytes" },
+                        "avail_kb": { "type": "integer", "description": "Available disk space in kilobytes" }
+                      },
+                      "required": ["ok", "total_kb", "used_kb", "avail_kb"]
+                    },
+                    { "$ref": "#/components/schemas/ErrorResponse" }
+                  ]
+                },
+                "example": { "ok": true, "total_kb": 102400000, "used_kb": 40960000, "avail_kb": 61440000 }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/machines/docker": {
+      "get": {
+        "tags": ["machines"],
+        "summary": "Remote Docker disk usage",
+        "description": "Returns Docker system disk usage (`docker system df`) on a remote host via SSH.",
+        "operationId": "machinesDocker",
+        "parameters": [
+          {
+            "name": "host",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "Hostname or IP of the remote machine",
+            "example": "10.0.2.10"
+          },
+          {
+            "name": "ssh_user",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "SSH username",
+            "example": "ubuntu"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Docker system df result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "ok": { "type": "boolean", "enum": [true] },
+                        "items": {
+                          "type": "array",
+                          "items": { "$ref": "#/components/schemas/DockerDfItem" }
+                        }
+                      },
+                      "required": ["ok", "items"]
+                    },
+                    { "$ref": "#/components/schemas/ErrorResponse" }
+                  ]
+                },
+                "example": {
+                  "ok": true,
+                  "items": [
+                    { "Type": "Images", "TotalCount": "12", "Active": "8", "Size": "4.2GB", "Reclaimable": "1.1GB" },
+                    { "Type": "Containers", "TotalCount": "6", "Active": "5", "Size": "128MB", "Reclaimable": "0B" }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/events": {
+      "get": {
+        "tags": ["realtime"],
+        "summary": "SSE real-time event stream",
+        "description": "Server-Sent Events stream. On connect the server immediately pushes a `full_state` snapshot. Subsequent events are `service_update` (health change or SSH command) or `full_state` (discovery / config reload).\n\nConnect with the browser's `EventSource` API or any SSE client. The broadcast channel has capacity 64 — slow consumers that fall 64 messages behind will be dropped.\n\n```js\nconst es = new EventSource('/events');\nes.onmessage = (e) => {\n  const payload = JSON.parse(e.data);\n  // payload.type === 'full_state' | 'service_update'\n};\n```",
+        "operationId": "getEvents",
+        "responses": {
+          "200": {
+            "description": "SSE stream — each `data:` line is a JSON-serialised `SseEvent`",
+            "content": {
+              "text/event-stream": {
+                "schema": { "$ref": "#/components/schemas/SseEvent" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/ws": {
+      "get": {
+        "tags": ["realtime"],
+        "summary": "WebSocket bidirectional channel",
+        "description": "Upgrade to a WebSocket connection. Receives the same broadcast events as SSE, and also accepts inbound command messages.\n\n**Client → server:** Send a JSON object `{ \"type\": \"cmd\", \"id\": \"<service-id>\", \"cmd\": \"restart\" }` to execute a lifecycle command. The result is broadcast to **all** connected clients.\n\n**Server → client:** JSON strings identical to SSE event payloads.",
+        "operationId": "getWs",
+        "responses": {
+          "101": {
+            "description": "WebSocket upgrade successful"
+          }
+        }
+      }
+    }
+  },
+
+  "components": {
+    "schemas": {
+      "Service": {
+        "type": "object",
+        "description": "A managed service (either YAML-defined or auto-discovered via Docker).",
+        "properties": {
+          "id":                { "type": "string",  "description": "Unique identifier" },
+          "name":              { "type": "string",  "description": "Human-readable display name" },
+          "host":              { "type": "string",  "description": "Hostname or IP of the remote machine" },
+          "port":              { "type": ["integer", "null"], "description": "Service port (informational)" },
+          "ssh_user":          { "type": ["string", "null"],  "description": "SSH username for all remote operations" },
+          "status":            { "type": "string",  "description": "Last known status (running / stopped / unknown / error / …)" },
+          "tags":              { "type": "array",   "items": { "type": "string" }, "description": "Arbitrary tags for filtering" },
+          "stacks":            { "type": "array",   "items": { "type": "string" }, "description": "Logical stack groupings" },
+          "dependencies":      { "type": "array",   "items": { "type": "string" }, "description": "IDs of services this service depends on" },
+          "discovered":        { "type": "boolean", "description": "true if auto-discovered; false if YAML-defined" },
+          "start_cmd":         { "type": ["string", "null"] },
+          "stop_cmd":          { "type": ["string", "null"] },
+          "restart_cmd":       { "type": ["string", "null"] },
+          "health_cmd":        { "type": ["string", "null"], "description": "SSH command whose exit code indicates health" },
+          "health_path":       { "type": ["string", "null"], "description": "HTTP path for HTTP health checks (e.g. /health)" },
+          "log_path":          { "type": ["string", "null"], "description": "Absolute path on remote host for log tailing" },
+          "log_cmd":           { "type": ["string", "null"], "description": "Custom log command (overrides log_path)" },
+          "container_name":    { "type": ["string", "null"] },
+          "container_id":      { "type": ["string", "null"] },
+          "image":             { "type": ["string", "null"] },
+          "predicted_app_path":{ "type": ["string", "null"] },
+          "quick_commands":    {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/QuickCommand" }
+          }
+        },
+        "required": ["id", "name", "host", "status", "discovered"]
+      },
+
+      "QuickCommand": {
+        "type": "object",
+        "properties": {
+          "name":         { "type": "string",  "description": "Identifier used in POST /services/quick" },
+          "cmd":          { "type": "string",  "description": "Shell command to run" },
+          "description":  { "type": ["string", "null"] },
+          "in_container": { "type": ["boolean", "null"], "description": "If true, wraps cmd in docker exec -it <container_name> …" }
+        },
+        "required": ["name", "cmd"]
+      },
+
+      "Job": {
+        "type": "object",
+        "properties": {
+          "id":          { "type": "string",  "description": "Job ID (hex timestamp + counter)" },
+          "service_id":  { "type": "string" },
+          "cmd":         { "type": "string",  "description": "The command that was run" },
+          "state":       { "type": "string",  "enum": ["running", "done", "failed"] },
+          "output":      { "type": "array",   "items": { "type": "string" }, "description": "Captured output lines (capped at 10 000)" },
+          "exit_code":   { "type": ["integer", "null"] },
+          "started_at":  { "type": "integer", "description": "Unix epoch milliseconds" },
+          "finished_at": { "type": ["integer", "null"], "description": "Unix epoch milliseconds; null while running" }
+        },
+        "required": ["id", "service_id", "cmd", "state", "output", "started_at"]
+      },
+
+      "Preferences": {
+        "type": "object",
+        "properties": {
+          "show_tooltips": { "type": "boolean" },
+          "theme":         { "type": "string", "enum": ["dark", "light"] }
+        }
+      },
+
+      "TopologyEdge": {
+        "type": "object",
+        "properties": {
+          "from": { "type": "string" },
+          "to":   { "type": "string" }
+        },
+        "required": ["from", "to"]
+      },
+
+      "DockerDfItem": {
+        "type": "object",
+        "properties": {
+          "Type":        { "type": "string" },
+          "TotalCount":  { "type": "string" },
+          "Active":      { "type": "string" },
+          "Size":        { "type": "string" },
+          "Reclaimable": { "type": "string" }
+        }
+      },
+
+      "SseEvent": {
+        "description": "A Server-Sent Event payload (JSON string in the `data:` field).",
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "full_state",
+            "description": "Sent on initial connect, config reload, and discovery.",
+            "properties": {
+              "type":     { "type": "string", "enum": ["full_state"] },
+              "services": { "type": "array", "items": { "$ref": "#/components/schemas/Service" } }
+            },
+            "required": ["type", "services"]
+          },
+          {
+            "type": "object",
+            "title": "service_update",
+            "description": "Sent when a service's status changes or an SSH command starts/completes.",
+            "properties": {
+              "type":    { "type": "string", "enum": ["service_update"] },
+              "service": { "$ref": "#/components/schemas/Service" }
+            },
+            "required": ["type", "service"]
+          }
+        ]
+      },
+
+      "ServiceCmdRequest": {
+        "type": "object",
+        "properties": {
+          "id":  { "type": "string", "description": "Service ID" },
+          "cmd": {
+            "type": "string",
+            "description": "Lifecycle command. Built-in values: `start`, `stop`, `restart`. Any other value is passed as a raw SSH command."
+          }
+        },
+        "required": ["id", "cmd"]
+      },
+
+      "ServiceLogsRequest": {
+        "type": "object",
+        "properties": {
+          "id":    { "type": "string",  "description": "Service ID" },
+          "lines": { "type": "integer", "default": 200, "description": "Number of log lines to fetch" }
+        },
+        "required": ["id"]
+      },
+
+      "DiscoverRequest": {
+        "type": "object",
+        "properties": {
+          "host":     { "type": "string",            "description": "Hostname or IP of the remote Docker host" },
+          "ssh_user": { "type": ["string", "null"],  "description": "SSH username (uses current user if omitted)" }
+        },
+        "required": ["host"]
+      },
+
+      "PluginExecRequest": {
+        "type": "object",
+        "properties": {
+          "name":  { "type": "string", "description": "Plugin file stem (no .wasm). Path separators and `..` are rejected." },
+          "input": {
+            "description": "Arbitrary JSON value serialised to a string and passed to the plugin's execute function.",
+            "nullable": true
+          }
+        },
+        "required": ["name"]
+      },
+
+      "OkResponse": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean", "enum": [true] }
+        },
+        "required": ["ok"]
+      },
+
+      "OkOutputResponse": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "ok":     { "type": "boolean", "enum": [true] },
+              "output": { "type": "string" }
+            },
+            "required": ["ok", "output"]
+          },
+          { "$ref": "#/components/schemas/ErrorResponse" }
+        ]
+      },
+
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "ok":    { "type": "boolean", "enum": [false] },
+          "error": { "type": "string",  "description": "Human-readable error message" }
+        },
+        "required": ["ok", "error"]
+      }
+    }
+  }
+}
