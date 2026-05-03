@@ -7,7 +7,6 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <script src="https://unpkg.com/htmx.org@1.9.2"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
   <style>
     :root {
@@ -66,7 +65,24 @@
       border-right: 1px solid var(--card-border);
       backdrop-filter: blur(12px);
       display: flex; flex-direction: column; flex-shrink: 0; z-index: 100;
+      transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1);
     }
+    .sidebar.collapsed { width: 60px; }
+    .sidebar.collapsed .sidebar-logo-text,
+    .sidebar.collapsed .nav-item-label,
+    .sidebar.collapsed .sidebar-attribution,
+    .sidebar.collapsed #status-text { display: none; }
+    .sidebar.collapsed .sidebar-header { justify-content: center; padding: 16px 8px; }
+    .sidebar.collapsed .nav-item { justify-content: center; padding: 12px; gap: 0; }
+    .sidebar.collapsed .nav-item.active { margin-left: 0; padding-left: 12px; border-radius: var(--radius); }
+    .sidebar.collapsed #connection-status { justify-content: center; padding: 16px 0; }
+    .sidebar-collapse-btn {
+      margin-left: auto; background: transparent !important; border: 1px solid transparent !important;
+      color: var(--text-dim); cursor: pointer; border-radius: 6px;
+      padding: 4px 6px; display: flex; align-items: center; flex-shrink: 0;
+    }
+    .sidebar-collapse-btn:hover { background: rgba(255,255,255,0.07) !important; color: var(--text-main); transform: none !important; }
+    .sidebar.collapsed .sidebar-collapse-btn { margin-left: 0; }
     .sidebar-header { padding: 24px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--card-border); }
     .logo-icon {
       width: 32px; height: 32px; background: var(--accent);
@@ -373,18 +389,22 @@
     <div class="sidebar-header">
       <div class="logo-icon"><i data-lucide="shield"></i></div>
       <span class="sidebar-logo-text">Rustboard</span>
+      <button class="sidebar-collapse-btn" id="sidebar-toggle" title="Collapse sidebar">
+        <i data-lucide="chevrons-left" style="width:16px;height:16px;"></i>
+      </button>
     </div>
     <ul class="nav-list">
-      <li class="nav-item active" data-view="nodes" data-tooltip="View and manage all services"><i data-lucide="layout-grid"></i> Services</li>
-      <li class="nav-item" data-view="topology" data-tooltip="Visualize service dependencies"><i data-lucide="git-merge"></i> Topology</li>
-      <li class="nav-item" data-view="plugins" data-tooltip="Run custom system extensions"><i data-lucide="zap"></i> Plugins</li>
+      <li class="nav-item active" data-view="nodes" data-tooltip="View and manage all services"><i data-lucide="layout-grid"></i> <span class="nav-item-label">Services</span></li>
+      <li class="nav-item" data-view="topology" data-tooltip="Visualize service dependencies"><i data-lucide="git-merge"></i> <span class="nav-item-label">Topology</span></li>
+      <li class="nav-item" data-view="plugins" data-tooltip="Run custom system extensions"><i data-lucide="zap"></i> <span class="nav-item-label">Plugins</span></li>
     </ul>
     <div style="padding: 24px; border-top: 1px solid var(--card-border);">
       <div id="connection-status" class="info-item">
         <div style="width: 8px; height: 8px; background: var(--danger); border-radius: 50%;" id="status-dot"></div>
         <span id="status-text">Disconnected</span>
       </div>
-    <div style="padding: 12px 24px; border-top: 1px solid var(--card-border); font-size: 10px; color: var(--text-dim); text-align: center;">
+    </div>
+    <div class="sidebar-attribution" style="padding: 12px 24px; border-top: 1px solid var(--card-border); font-size: 10px; color: var(--text-dim); text-align: center;">
       An Open Source contribution from<br/>
       <strong style="color: var(--accent);">International Micro Services (IMS)</strong>
     </div>
@@ -914,8 +934,27 @@
     // ─── Discovery Drawer ───────────────────────────────────────────────────────
     const discoverOverlay = document.getElementById('discover-overlay');
 
+    // Persists scan state across drawer open/close cycles
+    let discoveryState = { progressHtml: '', resultsHtml: '', lastHost: '', lastUser: '' };
+
     document.getElementById('discover-open-btn').onclick = async () => {
       discoverOverlay.classList.add('active');
+      // Restore last scan state when reopening
+      if (discoveryState.lastHost) {
+        document.getElementById('discover-host').value = discoveryState.lastHost;
+      }
+      if (discoveryState.lastUser) {
+        document.getElementById('discover-user').value = discoveryState.lastUser;
+      }
+      const progress = document.getElementById('discover-progress');
+      const results  = document.getElementById('discover-results');
+      if (discoveryState.progressHtml) {
+        progress.style.display = 'flex';
+        progress.innerHTML = discoveryState.progressHtml;
+      }
+      if (discoveryState.resultsHtml) {
+        results.innerHTML = discoveryState.resultsHtml;
+      }
       await loadKnownHosts();
       lucide.createIcons();
     };
@@ -950,49 +989,132 @@
       const host = document.getElementById('discover-host').value.trim();
       const user = document.getElementById('discover-user').value.trim() || null;
       if (!host) { alert('Please enter a host/IP'); return; }
+      discoveryState.lastHost = host;
+      discoveryState.lastUser = user || '';
       await runDiscovery(host, user);
     };
+
+    function buildDiscoverResultItem(s) {
+      const imageName = s.image ? s.image.split('/').pop().split(':')[0] : 'unknown';
+      const fullImage = s.image || '';
+      const portBadge = s.port
+        ? `<span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:3px;">:${s.port}</span>`
+        : '';
+      const imageChip  = `<span style="font-size:10px;color:var(--text-dim);background:rgba(255,255,255,0.04);padding:1px 6px;border-radius:3px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle;" title="${fullImage}">${imageName}</span>`;
+      const stackChips = (s.stacks||[]).map(st => `<span class="chip chip-stack" style="font-size:10px;padding:1px 6px;">${st}</span>`).join('');
+      const tagChips   = (s.tags  ||[]).map(t  => `<span class="chip chip-tag"   style="font-size:10px;padding:1px 6px;">${t}</span>`).join('');
+      return `
+        <div class="discover-result-item" style="flex-direction:column;align-items:flex-start;gap:5px;">
+          <div style="display:flex;align-items:center;gap:10px;width:100%;">
+            <i data-lucide="box" style="flex-shrink:0;"></i>
+            <span class="discover-result-name" style="flex-grow:1;">${s.name}</span>
+            <span class="discover-result-status ${s.status === 'running' ? 'status-running' : 'status-stopped'}">${s.status}</span>
+          </div>
+          <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;padding-left:24px;">
+            ${imageChip}${portBadge}${stackChips}${tagChips}
+          </div>
+        </div>`;
+    }
 
     async function runDiscovery(host, sshUser) {
       const progress = document.getElementById('discover-progress');
       const results  = document.getElementById('discover-results');
-      progress.style.display = 'flex';
-      progress.innerHTML = `<div class="discover-progress"><i data-lucide="loader-2" class="pulse" style="width:16px;flex-shrink:0;"></i> Scanning ${host} via SSH...</div>`;
+
+      discoveryState.progressHtml = '';
+      discoveryState.resultsHtml  = '';
       results.innerHTML = '';
-      lucide.createIcons();
+
+      const phases = [
+        { text: `Connecting to ${host} via SSH…` },
+        { text: 'Querying Docker daemon…'         },
+        { text: 'Parsing container list…'         },
+      ];
+
+      function renderProgress(doneCount, currentIdx, failed) {
+        const lines = phases.map((p, i) => {
+          if (i < doneCount) {
+            return `<div style="display:flex;align-items:center;gap:8px;color:var(--safe);font-size:12px;">
+              <i data-lucide="check" style="width:11px;flex-shrink:0;"></i><span>${p.text}</span></div>`;
+          } else if (i === currentIdx) {
+            const col = failed ? 'color:var(--danger)' : 'color:var(--discovered)';
+            const ico = failed ? 'x-circle' : 'loader-2';
+            const cls = failed ? '' : 'class="pulse"';
+            return `<div style="display:flex;align-items:center;gap:8px;${col};font-size:12px;">
+              <i data-lucide="${ico}" ${cls} style="width:11px;flex-shrink:0;"></i><span>${p.text}</span></div>`;
+          } else {
+            return `<div style="display:flex;align-items:center;gap:8px;color:var(--text-dim);font-size:12px;opacity:0.4;">
+              <i data-lucide="circle" style="width:11px;flex-shrink:0;"></i><span>${p.text}</span></div>`;
+          }
+        }).join('');
+        const html = `
+          <div style="background:rgba(168,85,247,0.07);border:1px solid rgba(168,85,247,0.2);border-radius:8px;padding:14px 16px;width:100%;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-weight:600;font-size:13px;color:var(--discovered);">
+              <i data-lucide="scan-search" style="width:14px;"></i> Scanning ${host}
+            </div>
+            <div style="display:flex;flex-direction:column;gap:5px;">${lines}</div>
+          </div>`;
+        progress.style.display = 'flex';
+        progress.innerHTML = html;
+        discoveryState.progressHtml = html;
+        lucide.createIcons();
+      }
+
+      renderProgress(0, 0, false);
+
+      const fetchPromise = fetch('/discover', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host, ssh_user: sshUser })
+      });
+      const t1 = setTimeout(() => renderProgress(1, 1, false), 800);
+      const t2 = setTimeout(() => renderProgress(2, 2, false), 1600);
 
       try {
-        const res  = await fetch('/discover', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ host, ssh_user: sshUser })
-        });
+        const res = await fetchPromise;
+        clearTimeout(t1); clearTimeout(t2);
+        renderProgress(phases.length, phases.length - 1, false);
         const data = await res.json();
-        progress.style.display = 'none';
 
         if (!data.ok) {
-          results.innerHTML = `<div style="color:var(--danger);font-size:13px;padding:12px;background:rgba(218,54,51,0.08);border:1px solid rgba(218,54,51,0.2);border-radius:8px;">Error: ${data.error}</div>`;
+          renderProgress(0, 0, true);
+          const errHtml = `<div style="color:var(--danger);font-size:13px;padding:12px;background:rgba(218,54,51,0.08);border:1px solid rgba(218,54,51,0.2);border-radius:8px;margin-top:8px;">
+            <strong>Scan failed:</strong> ${data.error || 'unknown error'}
+          </div>`;
+          results.innerHTML = errHtml;
+          discoveryState.resultsHtml = errHtml;
+          lucide.createIcons();
           return;
         }
 
         const found = data.services || [];
-        if (!found.length) {
-          results.innerHTML = `<div style="color:var(--text-dim);font-size:13px;padding:12px;">No new containers found (all already tracked).</div>`;
-        } else {
-          results.innerHTML = `<p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--discovered);margin:0 0 10px;">✦ ${found.length} new service${found.length!==1?'s':''} discovered</p>` +
-            found.map(s => `
-              <div class="discover-result-item">
-                <i data-lucide="box"></i>
-                <span class="discover-result-name">${s.name}</span>
-                <span class="discover-result-status ${s.status === 'running' ? 'status-running' : 'status-stopped'}">${s.status}</span>
-              </div>`).join('');
-        }
+        const summaryHtml = `
+          <div style="background:rgba(168,85,247,0.07);border:1px solid rgba(168,85,247,0.2);border-radius:8px;padding:10px 14px;width:100%;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--discovered);">
+            <i data-lucide="check-circle" style="width:13px;flex-shrink:0;"></i>
+            <span>Scanned <strong>${host}</strong> — <strong>${found.length}</strong> new container${found.length!==1?'s':''} found</span>
+          </div>`;
+        progress.innerHTML = summaryHtml;
+        discoveryState.progressHtml = summaryHtml;
         lucide.createIcons();
-        // refresh the main view
+
+        if (!found.length) {
+          const noResultHtml = `<div style="color:var(--text-dim);font-size:13px;padding:12px;">No new containers found (all already tracked).</div>`;
+          results.innerHTML = noResultHtml;
+          discoveryState.resultsHtml = noResultHtml;
+        } else {
+          const header = `<p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--discovered);margin:0 0 10px;">✦ ${found.length} new service${found.length!==1?'s':''} discovered</p>`;
+          const items  = found.map(s => buildDiscoverResultItem(s)).join('');
+          results.innerHTML = header + items;
+          discoveryState.resultsHtml = header + items;
+          lucide.createIcons();
+        }
         await fetchServices();
         await loadKnownHosts();
       } catch (e) {
-        progress.style.display = 'none';
-        results.innerHTML = `<div style="color:var(--danger);font-size:13px;">Network error: ${e}</div>`;
+        clearTimeout(t1); clearTimeout(t2);
+        renderProgress(0, 0, true);
+        const errHtml = `<div style="color:var(--danger);font-size:13px;">Network error: ${e}</div>`;
+        results.innerHTML = errHtml;
+        discoveryState.progressHtml = '';
+        discoveryState.resultsHtml = errHtml;
       }
     }
 
@@ -1404,6 +1526,23 @@
       const t = e.target;
       execAutoScroll = (t.scrollTop + t.offsetHeight) >= (t.scrollHeight - 20);
     });
+
+    // ─── Sidebar Collapse ────────────────────────────────────────────────────────
+    (() => {
+      const sidebar = document.querySelector('.sidebar');
+      const toggle  = document.getElementById('sidebar-toggle');
+      if (localStorage.getItem('sidebarCollapsed') === 'true') {
+        sidebar.classList.add('collapsed');
+        toggle.querySelector('i').setAttribute('data-lucide', 'chevrons-right');
+        lucide.createIcons();
+      }
+      toggle.addEventListener('click', () => {
+        const isNowCollapsed = sidebar.classList.toggle('collapsed');
+        localStorage.setItem('sidebarCollapsed', isNowCollapsed);
+        toggle.querySelector('i').setAttribute('data-lucide', isNowCollapsed ? 'chevrons-right' : 'chevrons-left');
+        lucide.createIcons();
+      });
+    })();
 
     // ─── Startup ────────────────────────────────────────────────────────────────
     initWS();

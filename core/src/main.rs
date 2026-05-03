@@ -392,27 +392,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(b) => b,
                 Err(_) => return axum::Json(json!({"ok": false, "error": "invalid json"})),
             };
-            let services = state.services.read().await;
-            if let Some(s) = services.iter().find(|s| s.id == body.id) {
+            // Clone only what we need, then release the read lock BEFORE the SSH call.
+            // Holding an RwLock read guard across an async SSH await blocks all pending
+            // writers (auto-rediscovery, health checks) which in turn blocks new readers
+            // under Tokio's write-preferring RwLock — causing log requests to hang.
+            enum LogSource { Cmd(String, Option<String>, String), Path(String, Option<String>, String), None }
+            let source = {
+                let services = state.services.read().await;
                 let lines = body.lines.unwrap_or(200);
-                if let Some(cmd) = &s.log_cmd {
-                    // Use custom log command. We might want to append `| tail -n <lines>` if not already there or just use it.
-                    // For safety, we wrap the command and tail the output.
-                    let full_cmd = format!("{} 2>&1 | tail -n {}", cmd, lines);
-                    match ssh::run_command(s.ssh_user.as_deref(), &s.host, &full_cmd).await {
-                        Ok(out) => return axum::Json(json!({"ok": true, "logs": out})),
-                        Err(e) => return axum::Json(json!({"ok": false, "error": format!("{}", e)})),
-                    }
-                } else if let Some(path) = &s.log_path {
-                    match ssh::tail_file(s.ssh_user.as_deref(), &s.host, path, lines).await {
-                        Ok(out) => return axum::Json(json!({"ok": true, "logs": out})),
-                        Err(e) => return axum::Json(json!({"ok": false, "error": format!("{}", e)})),
+                if let Some(s) = services.iter().find(|s| s.id == body.id) {
+                    if let Some(cmd) = &s.log_cmd {
+                        let full_cmd = format!("{} 2>&1 | tail -n {}", cmd, lines);
+                        LogSource::Cmd(s.host.clone(), s.ssh_user.clone(), full_cmd)
+                    } else if let Some(path) = &s.log_path {
+                        LogSource::Path(s.host.clone(), s.ssh_user.clone(), path.clone())
+                    } else {
+                        LogSource::None
                     }
                 } else {
-                    return axum::Json(json!({"ok": false, "error": "no logs configured"}));
+                    return axum::Json(json!({"ok": false, "error": "service not found"}));
                 }
+                // read guard is dropped here
+            };
+            let lines = body.lines.unwrap_or(200);
+            match source {
+                LogSource::Cmd(host, ssh_user, full_cmd) => {
+                    match ssh::run_command(ssh_user.as_deref(), &host, &full_cmd).await {
+                        Ok(out) => return axum::Json(json!({"ok": true, "logs": out})),
+                        Err(e) => return axum::Json(json!({"ok": false, "error": format!("{}", e)})),
+                    }
+                }
+                LogSource::Path(host, ssh_user, path) => {
+                    match ssh::tail_file(ssh_user.as_deref(), &host, &path, lines).await {
+                        Ok(out) => return axum::Json(json!({"ok": true, "logs": out})),
+                        Err(e) => return axum::Json(json!({"ok": false, "error": format!("{}", e)})),
+                    }
+                }
+                LogSource::None => return axum::Json(json!({"ok": false, "error": "no logs configured"})),
             }
-            axum::Json(json!({"ok": false, "error": "service not found"}))
         }
     });
 
