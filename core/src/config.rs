@@ -28,8 +28,14 @@ pub fn load_preferences_from_file(path: &str) -> Result<Preferences> {
 /// present in the main config are never overwritten by a discovered copy.
 pub fn load_all_services(config_path: &str) -> Vec<Service> {
     let mut services = match load_services_from_file(config_path) {
-        Ok(s) => s,
-        Err(_) => Vec::new(),
+        Ok(s) => {
+            tracing::info!("Loaded {} service(s) from '{}'", s.len(), config_path);
+            s
+        },
+        Err(e) => {
+            tracing::warn!("Failed to load config '{}': {}. Starting with no services.", config_path, e);
+            Vec::new()
+        },
     };
 
     let discovered_dir = "config/discovered";
@@ -41,17 +47,20 @@ pub fn load_all_services(config_path: &str) -> Vec<Service> {
             if path.extension().map_or(false, |e| e == "yaml" || e == "yml") {
                 if let Ok(content) = fs::read_to_string(&path) {
                     if let Ok(svcs) = serde_yaml::from_str::<Vec<Service>>(&content) {
+                        let count = svcs.len();
                         for svc in svcs {
                             if !existing_ids.contains(&svc.id) {
                                 existing_ids.insert(svc.id.clone());
                                 services.push(svc);
                             }
                         }
+                        tracing::debug!("Loaded {} discovered service(s) from '{}'", count, path.display());
                     }
                 }
             }
         }
     }
+    tracing::info!("Total services loaded: {}", services.len());
     services
 }
 

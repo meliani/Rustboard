@@ -84,6 +84,7 @@ async fn perform_service_cmd(state: SharedState, id: String, action: String) -> 
                 other => Some(other.to_string()),
             };
             if maybe_cmd.is_none() {
+                tracing::warn!("Service '{}': no command configured for action '{}'", id, action);
                 return json!({"ok": false, "error": "no command configured"});
             }
             // optimistic status update
@@ -92,13 +93,17 @@ async fn perform_service_cmd(state: SharedState, id: String, action: String) -> 
             let _ = state.broadcaster.send(json!({"type": "service_update", "service": s_clone}).to_string());
             (s.host.clone(), s.ssh_user.clone(), maybe_cmd.unwrap())
         } else {
+            tracing::warn!("Service '{}' not found", id);
             return json!({"ok": false, "error": "service not found"});
         }
     };
 
+    tracing::info!("Service '{}': running '{}' on {}", id, action, host);
+    tracing::debug!("Service '{}': SSH cmd: {}", id, cmd_to_run);
     // run SSH outside the lock
     match ssh::run_command(ssh_user.as_deref(), &host, &cmd_to_run).await {
         Ok(out) => {
+            tracing::info!("Service '{}': '{}' completed successfully", id, action);
             let mut services = state.services.write().await;
             if let Some(s) = services.iter_mut().find(|s| s.id == id) {
                 s.status = action.clone();
@@ -108,6 +113,7 @@ async fn perform_service_cmd(state: SharedState, id: String, action: String) -> 
             json!({"ok": true, "output": out})
         }
         Err(e) => {
+            tracing::warn!("Service '{}': '{}' failed: {}", id, action, e);
             let mut services = state.services.write().await;
             if let Some(s) = services.iter_mut().find(|s| s.id == id) {
                 s.status = "error".to_string();
@@ -220,14 +226,59 @@ async fn machine_docker(Query(q): Query<MachineQuery>) -> Json<serde_json::Value
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
+    // If a .env or rustboard.env file exists next to the executable, load env vars from it.
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let candidates = ["rustboard.env", ".env", "RUST_LOG"];
+            for name in &candidates {
+                let path = exe_dir.join(name);
+                if path.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        for line in content.lines() {
+                            let l = line.trim();
+                            if l.is_empty() || l.starts_with('#') {
+                                continue;
+                            }
+                            if let Some(eq) = l.find('=') {
+                                let key = l[..eq].trim();
+                                let val = l[eq+1..].trim();
+                                if std::env::var_os(key).is_none() {
+                                    std::env::set_var(key, val);
+                                }
+                            } else {
+                                // Single token: treat as RUST_LOG.
+                                if std::env::var_os("RUST_LOG").is_none() {
+                                    std::env::set_var("RUST_LOG", l);
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // Default to INFO level; set RUST_LOG=debug for verbose output.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .init();
+
+    tracing::info!("Rustboard starting up");
 
     let config_path = std::env::args().nth(1).unwrap_or_else(|| "config/services.example.yaml".to_string());
+    tracing::info!("Loading config from: {}", config_path);
     // Load main config + auto-merge any previously-discovered YAML files
     let initial_services = config::load_all_services(&config_path);
+    tracing::info!("Loaded {} service(s)", initial_services.len());
     let pref_path = "config/preferences.yaml";
     let initial_prefs = match config::load_preferences_from_file(pref_path) {
-        Ok(p) => p,
+        Ok(p) => {
+            tracing::info!("Loaded preferences (theme: {})", p.theme);
+            p
+        },
         Err(e) => {
             tracing::warn!("Failed to load prefs {}: {}. Using defaults.", pref_path, e);
             config::Preferences { show_tooltips: true, theme: "dark".to_string() }
@@ -245,6 +296,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Background health check worker
     let health_state = state.clone();
     tokio::spawn(async move {
+        tracing::debug!("Health check worker started (interval: 10s)");
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
         loop {
             interval.tick().await;
@@ -252,6 +304,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let s = health_state.services.read().await;
                 s.iter().map(|s| s.id.clone()).collect()
             };
+            tracing::debug!("Running health checks for {} service(s)", service_ids.len());
             
             for id in service_ids {
                 let service_clone = {
@@ -260,11 +313,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 
                 if let Some(mut s) = service_clone {
-                    // Skip checking if it's currently being "updated" via command (optional optimization)
                     let is_healthy = health::check_service(&s).await;
                     let new_status = if is_healthy { "running".to_string() } else { "stopped".to_string() };
+                    tracing::debug!("Health check '{}': {}", id, new_status);
                     
                     if s.status != new_status {
+                        tracing::info!("Service '{}' status changed: {} -> {}", id, s.status, new_status);
                         let mut services = health_state.services.write().await;
                         if let Some(target) = services.iter_mut().find(|x| x.id == id) {
                             target.status = new_status.clone();
@@ -284,9 +338,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // "Discover" click or an app restart.
     let rediscover_state = state.clone();
     tokio::spawn(async move {
+        tracing::debug!("Auto-rediscovery worker started (interval: 60s)");
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
+            tracing::debug!("Auto-rediscovery tick");
 
             // Collect unique (host, ssh_user) pairs that have at least one discovered service.
             let hosts: Vec<(String, Option<String>)> = {
@@ -311,6 +367,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 match discover::discover_docker_services(&host, ssh_user.as_deref(), &static_ids).await {
                     Ok(found) => {
+                        tracing::debug!("Auto-rediscovery found {} container(s) on {}", found.len(), host);
                         let mut changed = false;
                         {
                             let mut s = rediscover_state.services.write().await;
@@ -318,10 +375,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Some(existing) = s.iter_mut().find(|x| x.id == svc.id && x.discovered) {
                                     // Only overwrite (and flag as changed) if something meaningful differs.
                                     if existing.container_id != svc.container_id || existing.status != svc.status {
+                                        tracing::info!("Auto-rediscovery: updated service '{}' on {}", svc.id, host);
                                         *existing = svc;
                                         changed = true;
                                     }
                                 } else if !s.iter().any(|x| x.id == svc.id) {
+                                    tracing::info!("Auto-rediscovery: new service '{}' on {}", svc.id, host);
                                     s.push(svc);
                                     changed = true;
                                 }
@@ -438,12 +497,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = state_for_reload.clone();
         async move {
             let config_path = std::env::args().nth(1).unwrap_or_else(|| "config/services.example.yaml".to_string());
+            tracing::info!("Config reload requested from: {}", config_path);
             let mut ok = true;
             let mut error = String::new();
             
             // Reload services (main config + discovered files)
             {
                 let new = config::load_all_services(&config_path);
+                tracing::info!("Config reloaded: {} service(s)", new.len());
                 let mut s = state.services.write().await;
                 *s = new;
             }
@@ -452,10 +513,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let pref_path = "config/preferences.yaml";
             match config::load_preferences_from_file(pref_path) {
                 Ok(new) => {
+                    tracing::info!("Preferences reloaded (theme: {})", new.theme);
                     let mut p = state.preferences.write().await;
                     *p = new;
                 }
                 Err(e) => { 
+                    tracing::warn!("Failed to reload preferences: {}", e);
                     if ok { ok = false; error = format!("prefs: {}", e); }
                     else { error = format!("{}; prefs: {}", error, e); }
                 }
@@ -639,6 +702,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(_) => return axum::Json(json!({"ok": false, "error": "invalid json — expected {host, ssh_user}"})),
             };
 
+            tracing::info!("Discovery requested for host: {}", body.host);
+
             // Only skip YAML-configured (non-discovered) services to avoid overriding user
             // config.  Previously-discovered services are always refreshed so that redeployed
             // containers (same name, new container ID) get up-to-date metadata — container_id,
@@ -654,6 +719,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &static_ids,
             ).await {
                 Ok(found_services) => {
+                    tracing::info!("Discovery on '{}': found {} container(s)", body.host, found_services.len());
                     let mut new_count = 0usize;
                     let mut updated_count = 0usize;
                     {
@@ -661,14 +727,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         for svc in found_services.clone() {
                             if let Some(existing) = s.iter_mut().find(|x| x.id == svc.id && x.discovered) {
                                 // Refresh the existing discovered service with up-to-date metadata
+                                tracing::debug!("Discovery: updated service '{}'", svc.id);
                                 *existing = svc;
                                 updated_count += 1;
                             } else if !s.iter().any(|x| x.id == svc.id) {
+                                tracing::info!("Discovery: new service '{}' on '{}'", svc.id, body.host);
                                 s.push(svc);
                                 new_count += 1;
                             }
                         }
                     }
+                    tracing::info!("Discovery complete: {} new, {} updated", new_count, updated_count);
                     // Broadcast updated full state
                     {
                         let s = state.services.read().await;
@@ -883,7 +952,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(health))
         .layer(Extension(state));
     let addr = std::net::SocketAddr::from(([127,0,0,1], 8080));
-    tracing::info!("Rustboard listening on {}", addr);
+    tracing::info!("Rustboard listening on http://{}", addr);
+    tracing::info!("Press Ctrl+C to stop");
 
     // Open the dashboard in the default browser shortly after binding.
     // Runs in background so it doesn't block the server from starting.

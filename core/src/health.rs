@@ -5,6 +5,7 @@ use std::time::Duration;
 pub async fn check_service(s: &Service) -> bool {
     // 1. Prefer health_cmd if available (useful for remote Docker/SSH)
     if let Some(cmd) = &s.health_cmd {
+        tracing::debug!("Health '{}': running health_cmd", s.id);
         match crate::ssh::run_command(s.ssh_user.as_deref(), &s.host, cmd).await {
             Ok(output) => {
                 let low = output.to_lowercase();
@@ -19,6 +20,7 @@ pub async fn check_service(s: &Service) -> bool {
     let port = s.port.unwrap_or(80);
     let path = s.health_path.as_deref().unwrap_or("/");
     let url_str = format!("http://{}:{}{}", s.host, port, path);
+    tracing::debug!("Health '{}': HTTP check {}", s.id, url_str);
     // ...
     if let Ok(u) = url_str.parse::<reqwest::Url>() {
         match reqwest::Client::builder().timeout(Duration::from_secs(2)).build() {

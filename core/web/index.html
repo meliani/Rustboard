@@ -950,27 +950,25 @@
     // ─── Discovery Drawer ───────────────────────────────────────────────────────
     const discoverOverlay = document.getElementById('discover-overlay');
 
-    // Persists scan state across drawer open/close cycles
-    let discoveryState = { progressHtml: '', resultsHtml: '', lastHost: '', lastUser: '' };
+    // sessionStorage-backed discovery state — survives page refresh
+    const DISC_STORE_KEY = 'rustboard_discovery_state';
+    function discLoad() {
+      try { return JSON.parse(sessionStorage.getItem(DISC_STORE_KEY) || '{}'); } catch { return {}; }
+    }
+    function discSave(patch) {
+      const s = Object.assign(discLoad(), patch);
+      sessionStorage.setItem(DISC_STORE_KEY, JSON.stringify(s));
+    }
 
     document.getElementById('discover-open-btn').onclick = async () => {
       discoverOverlay.classList.add('active');
-      // Restore last scan state when reopening
-      if (discoveryState.lastHost) {
-        document.getElementById('discover-host').value = discoveryState.lastHost;
-      }
-      if (discoveryState.lastUser) {
-        document.getElementById('discover-user').value = discoveryState.lastUser;
-      }
+      const ds = discLoad();
+      if (ds.lastHost) document.getElementById('discover-host').value = ds.lastHost;
+      if (ds.lastUser) document.getElementById('discover-user').value = ds.lastUser;
       const progress = document.getElementById('discover-progress');
       const results  = document.getElementById('discover-results');
-      if (discoveryState.progressHtml) {
-        progress.style.display = 'flex';
-        progress.innerHTML = discoveryState.progressHtml;
-      }
-      if (discoveryState.resultsHtml) {
-        results.innerHTML = discoveryState.resultsHtml;
-      }
+      if (ds.progressHtml) { progress.style.display = 'flex'; progress.innerHTML = ds.progressHtml; }
+      if (ds.resultsHtml)  { results.innerHTML = ds.resultsHtml; }
       await loadKnownHosts();
       lucide.createIcons();
     };
@@ -998,6 +996,7 @@
 
     async function quickScan(host) {
       document.getElementById('discover-host').value = host;
+      discSave({ lastHost: host });
       await runDiscovery(host, null);
     }
 
@@ -1005,8 +1004,7 @@
       const host = document.getElementById('discover-host').value.trim();
       const user = document.getElementById('discover-user').value.trim() || null;
       if (!host) { alert('Please enter a host/IP'); return; }
-      discoveryState.lastHost = host;
-      discoveryState.lastUser = user || '';
+      discSave({ lastHost: host, lastUser: user || '' });
       await runDiscovery(host, user);
     };
 
@@ -1035,18 +1033,24 @@
     async function runDiscovery(host, sshUser) {
       const progress = document.getElementById('discover-progress');
       const results  = document.getElementById('discover-results');
-
-      discoveryState.progressHtml = '';
-      discoveryState.resultsHtml  = '';
       results.innerHTML = '';
 
       const phases = [
-        { text: `Connecting to ${host} via SSH…` },
-        { text: 'Querying Docker daemon…'         },
-        { text: 'Parsing container list…'         },
+        { text: `Connecting to ${host} via SSH…`      },
+        { text: 'Querying Docker daemon…'              },
+        { text: 'Parsing & inspecting containers…'     },
+        { text: 'Registering containers to dashboard…' },
       ];
 
+      let liveTimer = null;
+      let liveSeconds = 0;
+
+      function stopLiveTimer() {
+        if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+      }
+
       function renderProgress(doneCount, currentIdx, failed) {
+        stopLiveTimer();
         const lines = phases.map((p, i) => {
           if (i < doneCount) {
             return `<div style="display:flex;align-items:center;gap:8px;color:var(--safe);font-size:12px;">
@@ -1055,6 +1059,17 @@
             const col = failed ? 'color:var(--danger)' : 'color:var(--discovered)';
             const ico = failed ? 'x-circle' : 'loader-2';
             const cls = failed ? '' : 'class="pulse"';
+            const isParsePhase = (i === 2 && !failed);
+            if (isParsePhase) {
+              return `<div style="display:flex;flex-direction:column;gap:3px;">
+                <div style="display:flex;align-items:center;gap:8px;${col};font-size:12px;">
+                  <i data-lucide="${ico}" ${cls} style="width:11px;flex-shrink:0;"></i>
+                  <span>${p.text}</span>
+                  <span id="disc-parse-elapsed" style="color:var(--text-dim);font-size:11px;"></span>
+                </div>
+                <div id="disc-parse-hint" style="font-size:11px;color:var(--text-dim);padding-left:19px;display:none;line-height:1.5;"></div>
+              </div>`;
+            }
             return `<div style="display:flex;align-items:center;gap:8px;${col};font-size:12px;">
               <i data-lucide="${ico}" ${cls} style="width:11px;flex-shrink:0;"></i><span>${p.text}</span></div>`;
           } else {
@@ -1062,6 +1077,7 @@
               <i data-lucide="circle" style="width:11px;flex-shrink:0;"></i><span>${p.text}</span></div>`;
           }
         }).join('');
+
         const html = `
           <div style="background:rgba(168,85,247,0.07);border:1px solid rgba(168,85,247,0.2);border-radius:8px;padding:14px 16px;width:100%;">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-weight:600;font-size:13px;color:var(--discovered);">
@@ -1071,8 +1087,30 @@
           </div>`;
         progress.style.display = 'flex';
         progress.innerHTML = html;
-        discoveryState.progressHtml = html;
         lucide.createIcons();
+
+        // Start live elapsed counter when entering the parse phase
+        if (currentIdx === 2 && !failed) {
+          liveSeconds = 0;
+          liveTimer = setInterval(() => {
+            liveSeconds++;
+            const elEl   = document.getElementById('disc-parse-elapsed');
+            const hintEl = document.getElementById('disc-parse-hint');
+            if (elEl) elEl.textContent = `(${liveSeconds}s)`;
+            if (hintEl) {
+              if (liveSeconds === 5) {
+                hintEl.style.display = '';
+                hintEl.textContent = 'Docker is inspecting each container\'s metadata — normal for larger deployments.';
+              } else if (liveSeconds === 15) {
+                hintEl.innerHTML = 'Still working… Docker API can be slow when many containers are present or when labels/ports are verbose.<br>'
+                  + `<span style="color:var(--warning);">Tip: ensure the remote Docker socket is responsive (<code>docker info</code>).</span>`;
+              } else if (liveSeconds === 30) {
+                hintEl.innerHTML = `<span style="color:var(--warning);">⚠ Taking longer than expected (${liveSeconds}s). The SSH connection is alive but Docker is slow to respond. Check for I/O pressure on <strong>${host}</strong>.</span>`;
+              }
+            }
+          }, 1000);
+        }
+        // Do NOT save mid-scan state to sessionStorage — only persist final results
       }
 
       renderProgress(0, 0, false);
@@ -1087,16 +1125,19 @@
       try {
         const res = await fetchPromise;
         clearTimeout(t1); clearTimeout(t2);
-        renderProgress(phases.length, phases.length - 1, false);
+        stopLiveTimer();
+        // Phase 3: Registering
+        renderProgress(3, 3, false);
         const data = await res.json();
 
         if (!data.ok) {
+          stopLiveTimer();
           renderProgress(0, 0, true);
           const errHtml = `<div style="color:var(--danger);font-size:13px;padding:12px;background:rgba(218,54,51,0.08);border:1px solid rgba(218,54,51,0.2);border-radius:8px;margin-top:8px;">
             <strong>Scan failed:</strong> ${data.error || 'unknown error'}
           </div>`;
           results.innerHTML = errHtml;
-          discoveryState.resultsHtml = errHtml;
+          discSave({ progressHtml: progress.innerHTML, resultsHtml: errHtml });
           lucide.createIcons();
           return;
         }
@@ -1108,29 +1149,30 @@
             <span>Scanned <strong>${host}</strong> — <strong>${found.length}</strong> new container${found.length!==1?'s':''} found</span>
           </div>`;
         progress.innerHTML = summaryHtml;
-        discoveryState.progressHtml = summaryHtml;
         lucide.createIcons();
 
+        let resultsHtml = '';
         if (!found.length) {
-          const noResultHtml = `<div style="color:var(--text-dim);font-size:13px;padding:12px;">No new containers found (all already tracked).</div>`;
-          results.innerHTML = noResultHtml;
-          discoveryState.resultsHtml = noResultHtml;
+          resultsHtml = `<div style="color:var(--text-dim);font-size:13px;padding:12px;">No new containers found (all already tracked).</div>`;
         } else {
           const header = `<p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--discovered);margin:0 0 10px;">✦ ${found.length} new service${found.length!==1?'s':''} discovered</p>`;
-          const items  = found.map(s => buildDiscoverResultItem(s)).join('');
-          results.innerHTML = header + items;
-          discoveryState.resultsHtml = header + items;
+          resultsHtml   = header + found.map(s => buildDiscoverResultItem(s)).join('');
           lucide.createIcons();
         }
+        results.innerHTML = resultsHtml;
+        // Persist final completed state to sessionStorage
+        discSave({ progressHtml: summaryHtml, resultsHtml });
+        lucide.createIcons();
+
         await fetchServices();
         await loadKnownHosts();
       } catch (e) {
         clearTimeout(t1); clearTimeout(t2);
+        stopLiveTimer();
         renderProgress(0, 0, true);
         const errHtml = `<div style="color:var(--danger);font-size:13px;">Network error: ${e}</div>`;
         results.innerHTML = errHtml;
-        discoveryState.progressHtml = '';
-        discoveryState.resultsHtml = errHtml;
+        discSave({ progressHtml: '', resultsHtml: errHtml });
       }
     }
 

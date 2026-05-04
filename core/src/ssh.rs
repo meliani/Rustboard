@@ -28,6 +28,7 @@ fn ssh_target(ssh_user: Option<&str>, host: &str) -> String {
 /// Stderr is included (the remote shell merges it into stdout).
 pub async fn run_command(ssh_user: Option<&str>, host: &str, cmd: &str) -> Result<String> {
     let target = ssh_target(ssh_user, host);
+    tracing::debug!("SSH run on {}: {}", target, cmd);
     let output = Command::new("ssh")
         .args(SSH_OPTS)
         .arg(&target)
@@ -37,9 +38,11 @@ pub async fn run_command(ssh_user: Option<&str>, host: &str, cmd: &str) -> Resul
         .context("failed to spawn ssh")?;
 
     if output.status.success() {
+        tracing::debug!("SSH success on {}", target);
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::debug!("SSH error on {}: {}", target, stderr);
         Err(anyhow::anyhow!("ssh failed: {}", stderr))
     }
 }
