@@ -495,26 +495,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // read guard is dropped here
             };
             let lines = body.lines.unwrap_or(200);
-            const LOG_SSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+            const LOG_SSH_TIMEOUT: u64 = 30;
             match source {
                 LogSource::Cmd(host, ssh_user, full_cmd) => {
-                    match tokio::time::timeout(
-                        LOG_SSH_TIMEOUT,
-                        ssh::run_command(ssh_user.as_deref(), &host, &full_cmd),
-                    ).await {
-                        Ok(Ok(out)) => return axum::Json(json!({"ok": true, "logs": out})),
-                        Ok(Err(e)) => return axum::Json(json!({"ok": false, "error": format!("{}", e)})),
-                        Err(_) => return axum::Json(json!({"ok": false, "error": "SSH timed out after 30s"})),
+                    match ssh::run_command_with_timeout(ssh_user.as_deref(), &host, &full_cmd, LOG_SSH_TIMEOUT).await {
+                        Ok(out) => return axum::Json(json!({"ok": true, "logs": out})),
+                        Err(e) => return axum::Json(json!({"ok": false, "error": format!("{}", e)})),
                     }
                 }
                 LogSource::Path(host, ssh_user, path) => {
-                    match tokio::time::timeout(
-                        LOG_SSH_TIMEOUT,
-                        ssh::tail_file(ssh_user.as_deref(), &host, &path, lines),
-                    ).await {
-                        Ok(Ok(out)) => return axum::Json(json!({"ok": true, "logs": out})),
-                        Ok(Err(e)) => return axum::Json(json!({"ok": false, "error": format!("{}", e)})),
-                        Err(_) => return axum::Json(json!({"ok": false, "error": "SSH timed out after 30s"})),
+                    match ssh::tail_file(ssh_user.as_deref(), &host, &path, lines).await {
+                        Ok(out) => return axum::Json(json!({"ok": true, "logs": out})),
+                        Err(e) => return axum::Json(json!({"ok": false, "error": format!("{}", e)})),
                     }
                 }
                 LogSource::None => return axum::Json(json!({"ok": false, "error": "no logs configured"})),

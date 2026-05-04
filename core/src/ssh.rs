@@ -47,6 +47,63 @@ pub async fn run_command(ssh_user: Option<&str>, host: &str, cmd: &str) -> Resul
     }
 }
 
+/// Run a remote command with a hard timeout.
+///
+/// Uses `spawn()` + `kill_on_drop(true)` so that when the timeout fires,
+/// dropping the cancelled `wait_with_output()` future also sends SIGKILL to
+/// the local `ssh` process. Without this, `tokio::time::timeout` wrapping
+/// `.output()` would cancel the Rust future but leave the SSH child running
+/// indefinitely (e.g. a hung `docker logs` on a busy container).
+pub async fn run_command_with_timeout(
+    ssh_user: Option<&str>,
+    host: &str,
+    cmd: &str,
+    timeout_secs: u64,
+) -> Result<String> {
+    use std::process::Stdio;
+
+    let target = ssh_target(ssh_user, host);
+    tracing::debug!("SSH run on {}: {}", target, cmd);
+
+    let mut child = Command::new("ssh")
+        .args(SSH_OPTS)
+        .arg(&target)
+        .arg(cmd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to spawn ssh")?;
+
+    // kill_on_drop ensures the child process is SIGKILL'd when this Child
+    // is dropped — which happens when the timeout cancels wait_with_output().
+    child.kill_on_drop(true);
+
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        child.wait_with_output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) => {
+            if output.status.success() {
+                tracing::debug!("SSH success on {}", target);
+                Ok(String::from_utf8_lossy(&output.stdout).to_string())
+            } else {
+                // exit 124 = remote `timeout` command fired; treat as partial output
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::debug!("SSH error on {}: {}", target, stderr);
+                Err(anyhow::anyhow!("ssh failed: {}", stderr))
+            }
+        }
+        Ok(Err(e)) => Err(e).context("ssh wait failed"),
+        Err(_) => {
+            // Child is dropped here → kill_on_drop fires → SSH process is killed
+            tracing::debug!("SSH timeout on {} after {}s", target, timeout_secs);
+            Err(anyhow::anyhow!("SSH timed out after {}s", timeout_secs))
+        }
+    }
+}
+
 /// Run a remote command and stream each line of output through `tx`.
 /// Both stdout and stderr are captured (stderr is merged server-side with `2>&1`).
 ///
@@ -91,5 +148,5 @@ pub async fn run_command_streaming(
 
 pub async fn tail_file(ssh_user: Option<&str>, host: &str, path: &str, lines: usize) -> Result<String> {
     let cmd = format!("tail -n {} {}", lines, path);
-    run_command(ssh_user, host, &cmd).await
+    run_command_with_timeout(ssh_user, host, &cmd, 30).await
 }
