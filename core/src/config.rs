@@ -7,9 +7,13 @@ pub struct Preferences {
     pub show_tooltips: bool,
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// Active log verbosity: error | warn | info | debug | trace
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
 }
 
 fn default_theme() -> String { "dark".to_string() }
+fn default_log_level() -> String { "info".to_string() }
 
 pub fn load_services_from_file(path: &str) -> Result<Vec<Service>> {
     let data = fs::read_to_string(path)?;
@@ -21,6 +25,12 @@ pub fn load_preferences_from_file(path: &str) -> Result<Preferences> {
     let data = fs::read_to_string(path)?;
     let prefs: Preferences = serde_yaml::from_str(&data)?;
     Ok(prefs)
+}
+
+pub fn save_preferences_to_file(path: &str, prefs: &Preferences) -> Result<()> {
+    let yaml = serde_yaml::to_string(prefs)?;
+    fs::write(path, yaml)?;
+    Ok(())
 }
 
 /// Load services from the main config file, then merge any YAML files found in

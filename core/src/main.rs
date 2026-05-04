@@ -57,11 +57,15 @@ fn now_millis() -> u64 {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Type-erased closure that swaps the live tracing filter without restarting.
+type SetLogLevel = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync + 'static>;
+
 struct AppState {
-    services:    RwLock<Vec<Service>>,
-    preferences: RwLock<config::Preferences>,
-    broadcaster: broadcast::Sender<String>,
-    jobs:        RwLock<std::collections::HashMap<String, Job>>,
+    services:      RwLock<Vec<Service>>,
+    preferences:   RwLock<config::Preferences>,
+    broadcaster:   broadcast::Sender<String>,
+    jobs:          RwLock<std::collections::HashMap<String, Job>>,
+    set_log_level: SetLogLevel,
 }
 
 type SharedState = Arc<AppState>;
@@ -226,30 +230,29 @@ async fn machine_docker(Query(q): Query<MachineQuery>) -> Json<serde_json::Value
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // If a .env or rustboard.env file exists next to the executable, load env vars from it.
+    use tracing_subscriber::prelude::*;
+
+    // Load a .env file from the executable directory (rustboard.env or .env).
+    // Values are applied only when the variable is not already set in the environment,
+    // so a RUST_LOG passed by the shell / CI always takes priority.
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            let candidates = ["rustboard.env", ".env", "RUST_LOG"];
-            for name in &candidates {
+            for name in &["rustboard.env", ".env"] {
                 let path = exe_dir.join(name);
                 if path.exists() {
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         for line in content.lines() {
                             let l = line.trim();
-                            if l.is_empty() || l.starts_with('#') {
-                                continue;
-                            }
+                            if l.is_empty() || l.starts_with('#') { continue; }
                             if let Some(eq) = l.find('=') {
                                 let key = l[..eq].trim();
-                                let val = l[eq+1..].trim();
+                                let val = l[eq + 1..].trim();
                                 if std::env::var_os(key).is_none() {
                                     std::env::set_var(key, val);
                                 }
-                            } else {
-                                // Single token: treat as RUST_LOG.
-                                if std::env::var_os("RUST_LOG").is_none() {
-                                    std::env::set_var("RUST_LOG", l);
-                                }
+                            } else if std::env::var_os("RUST_LOG").is_none() {
+                                // bare token → treat as RUST_LOG value
+                                std::env::set_var("RUST_LOG", l);
                             }
                         }
                     }
@@ -259,38 +262,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Default to INFO level; set RUST_LOG=debug for verbose output.
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+    // Load preferences BEFORE initialising tracing so log_level from preferences.yaml
+    // can seed the initial filter.  Priority: RUST_LOG env var > prefs log_level > "info".
+    let pref_path = "config/preferences.yaml";
+    let initial_prefs = config::load_preferences_from_file(pref_path)
+        .unwrap_or_else(|_| config::Preferences {
+            show_tooltips: true,
+            theme: "dark".to_string(),
+            log_level: "info".to_string(),
+        });
+
+    let initial_level = std::env::var("RUST_LOG")
+        .unwrap_or_else(|_| initial_prefs.log_level.clone());
+
+    // Build a reload-capable subscriber so level can be changed at runtime via the UI.
+    let initial_filter = tracing_subscriber::EnvFilter::try_new(&initial_level)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
+    let (filter_layer, reload_handle) =
+        tracing_subscriber::reload::Layer::new(initial_filter);
+    tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(tracing_subscriber::fmt::layer())
         .init();
 
-    tracing::info!("Rustboard starting up");
+    tracing::info!("Rustboard starting up (log level: {})", initial_level);
 
-    let config_path = std::env::args().nth(1).unwrap_or_else(|| "config/services.example.yaml".to_string());
+    let config_path = std::env::args().nth(1)
+        .unwrap_or_else(|| "config/services.example.yaml".to_string());
     tracing::info!("Loading config from: {}", config_path);
     // Load main config + auto-merge any previously-discovered YAML files
     let initial_services = config::load_all_services(&config_path);
     tracing::info!("Loaded {} service(s)", initial_services.len());
-    let pref_path = "config/preferences.yaml";
-    let initial_prefs = match config::load_preferences_from_file(pref_path) {
-        Ok(p) => {
-            tracing::info!("Loaded preferences (theme: {})", p.theme);
-            p
-        },
-        Err(e) => {
-            tracing::warn!("Failed to load prefs {}: {}. Using defaults.", pref_path, e);
-            config::Preferences { show_tooltips: true, theme: "dark".to_string() }
-        }
-    };
+    tracing::info!("Preferences loaded — theme: {}, log_level: {}",
+        initial_prefs.theme, initial_prefs.log_level);
+
+    // Wrap the reload handle in an Arc + type-erased closure so AppState is non-generic.
+    let reload_handle = Arc::new(reload_handle);
+    let set_log_level: SetLogLevel = Arc::new(move |level: &str| {
+        let new_filter = tracing_subscriber::EnvFilter::try_new(level)
+            .map_err(|e| e.to_string())?;
+        reload_handle.reload(new_filter).map_err(|e| e.to_string())
+    });
+
     // broadcast channel for server-sent events
     let (bcast_tx, _bcast_rx) = broadcast::channel::<String>(64);
-    let state: SharedState = Arc::new(AppState { 
-        services:    RwLock::new(initial_services), 
-        preferences: RwLock::new(initial_prefs),
-        broadcaster: bcast_tx.clone(),
-        jobs:        RwLock::new(std::collections::HashMap::new()),
+    let state: SharedState = Arc::new(AppState {
+        services:      RwLock::new(initial_services),
+        preferences:   RwLock::new(initial_prefs),
+        broadcaster:   bcast_tx.clone(),
+        jobs:          RwLock::new(std::collections::HashMap::new()),
+        set_log_level,
     });
 
     // Background health check worker
@@ -513,7 +534,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let pref_path = "config/preferences.yaml";
             match config::load_preferences_from_file(pref_path) {
                 Ok(new) => {
-                    tracing::info!("Preferences reloaded (theme: {})", new.theme);
+                    tracing::info!("Preferences reloaded — theme: {}, log_level: {}",
+                        new.theme, new.log_level);
+                    // Live-apply the log level from the reloaded prefs.
+                    if let Err(e) = (state.set_log_level)(&new.log_level) {
+                        tracing::warn!("Could not apply log level '{}': {}", new.log_level, e);
+                    }
                     let mut p = state.preferences.write().await;
                     *p = new;
                 }
@@ -535,12 +561,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let state_for_prefs = state.clone();
+    let state_for_prefs      = state.clone();
+    let state_for_prefs_save = state.clone();
     let prefs_route = get(move || {
         let state = state_for_prefs.clone();
         async move {
             let p = state.preferences.read().await;
             axum::Json(json!(&*p))
+        }
+    // ── POST /preferences — save + live-apply settings ────────────────────────
+    }).post(move |req: axum::http::Request<axum::body::Body>| {
+        let state = state_for_prefs_save.clone();
+        async move {
+            let bytes = match hyper::body::to_bytes(req.into_body()).await {
+                Ok(b)  => b,
+                Err(_) => return axum::Json(json!({"ok": false, "error": "failed to read body"})),
+            };
+            let new_prefs: config::Preferences = match serde_json::from_slice(&bytes) {
+                Ok(p)  => p,
+                Err(e) => return axum::Json(json!({"ok": false, "error": format!("invalid json: {}", e)})),
+            };
+            // Validate allowed levels to prevent unexpected filter strings.
+            let allowed = ["error", "warn", "info", "debug", "trace"];
+            if !allowed.contains(&new_prefs.log_level.as_str()) {
+                return axum::Json(json!({"ok": false, "error": "log_level must be one of: error, warn, info, debug, trace"}));
+            }
+            // Apply the new log level live — no server restart needed.
+            if let Err(e) = (state.set_log_level)(&new_prefs.log_level) {
+                return axum::Json(json!({"ok": false, "error": format!("apply failed: {}", e)}));
+            }
+            tracing::info!("Log level changed to: {}", new_prefs.log_level);
+            // Persist to preferences.yaml.
+            let pref_path = "config/preferences.yaml";
+            if let Err(e) = config::save_preferences_to_file(pref_path, &new_prefs) {
+                tracing::warn!("Failed to save preferences: {}", e);
+                return axum::Json(json!({"ok": false, "error": format!("save failed: {}", e)}));
+            }
+            // Update in-memory state.
+            {
+                let mut p = state.preferences.write().await;
+                *p = new_prefs;
+            }
+            axum::Json(json!({"ok": true}))
         }
     });
 

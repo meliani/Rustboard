@@ -397,6 +397,7 @@
       <li class="nav-item active" data-view="nodes" data-tooltip="View and manage all services"><i data-lucide="layout-grid"></i> <span class="nav-item-label">Services</span></li>
       <li class="nav-item" data-view="topology" data-tooltip="Visualize service dependencies"><i data-lucide="git-merge"></i> <span class="nav-item-label">Topology</span></li>
       <li class="nav-item" data-view="plugins" data-tooltip="Run custom system extensions"><i data-lucide="zap"></i> <span class="nav-item-label">Plugins</span></li>
+      <li class="nav-item" data-view="settings" data-tooltip="Server &amp; display settings"><i data-lucide="settings-2"></i> <span class="nav-item-label">Settings</span></li>
     </ul>
     <div style="padding: 24px; border-top: 1px solid var(--card-border);">
       <div id="connection-status" class="info-item">
@@ -488,6 +489,56 @@
             <pre id="plugin-output">Ready...</pre>
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- Settings View -->
+    <section id="view-settings" class="content-area">
+      <div style="max-width:700px; margin:0 auto; display:flex; flex-direction:column; gap:24px;">
+
+        <!-- Log verbosity -->
+        <div class="plugin-card">
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
+            <i data-lucide="terminal" style="width:18px;height:18px;color:var(--accent)"></i>
+            <h3 style="margin:0; font-size:16px;">Log Verbosity</h3>
+          </div>
+          <p style="color:var(--text-dim); font-size:13px; margin:0 0 20px;">Controls how much the server prints to its console. Changes take effect immediately &mdash; no restart needed.</p>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;" id="log-level-pills">
+            <button class="log-lvl-btn" data-level="error">Error</button>
+            <button class="log-lvl-btn" data-level="warn">Warn</button>
+            <button class="log-lvl-btn active" data-level="info">Info</button>
+            <button class="log-lvl-btn" data-level="debug">Debug</button>
+            <button class="log-lvl-btn" data-level="trace">Trace</button>
+          </div>
+          <p style="color:var(--text-dim); font-size:11px; margin:14px 0 0;">
+            You can also place a <code style="background:rgba(255,255,255,0.07);padding:1px 5px;border-radius:3px;">rustboard.env</code>
+            next to the executable with <code style="background:rgba(255,255,255,0.07);padding:1px 5px;border-radius:3px;">RUST_LOG=debug</code> &mdash; that overrides this setting on startup.
+          </p>
+        </div>
+
+        <!-- Appearance -->
+        <div class="plugin-card">
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
+            <i data-lucide="sliders-horizontal" style="width:18px;height:18px;color:var(--accent)"></i>
+            <h3 style="margin:0; font-size:16px;">Appearance</h3>
+          </div>
+          <label style="display:flex; align-items:center; gap:12px; cursor:pointer; padding:12px 0;">
+            <input type="checkbox" id="settings-tooltips" style="width:auto;">
+            <div>
+              <div style="font-size:14px; font-weight:600;">Show tooltips</div>
+              <div style="font-size:12px; color:var(--text-dim);">Hover hints on buttons and nav items</div>
+            </div>
+          </label>
+        </div>
+
+        <!-- Save + feedback -->
+        <div style="display:flex; align-items:center; gap:14px;">
+          <button id="settings-save" class="primary" style="min-width:140px; justify-content:center;">
+            <i data-lucide="save" style="width:14px"></i> Save Settings
+          </button>
+          <span id="settings-feedback" style="font-size:13px; display:none;"></span>
+        </div>
+
       </div>
     </section>
   </main>
@@ -809,10 +860,11 @@
       document.querySelector(`[data-view="${viewId}"]`).classList.add('active');
       views.forEach(v => v.classList.remove('active'));
       document.getElementById(`view-${viewId}`).classList.add('active');
-      const titles = { nodes: 'Service Dashboard', topology: 'Network Topology', plugins: 'System Extensions' };
-      document.getElementById('view-title').textContent = titles[viewId];
+      const titles = { nodes: 'Service Dashboard', topology: 'Network Topology', plugins: 'System Extensions', settings: 'Settings' };
+      document.getElementById('view-title').textContent = titles[viewId] || viewId;
       if (viewId === 'topology') refreshTopology();
       if (viewId === 'plugins')  loadPlugins();
+      if (viewId === 'settings') loadSettingsView();
     }
 
     // ─── Commands ───────────────────────────────────────────────────────────────
@@ -1451,6 +1503,75 @@
         document.body.classList.toggle('no-tooltips', !preferences.show_tooltips);
       } catch (e) { console.error('Failed to fetch prefs', e); }
     }
+
+    // ─── Settings View ──────────────────────────────────────────────────────────
+    // Inject pill button styles (keeps the main <style> block clean).
+    (() => {
+      const s = document.createElement('style');
+      s.textContent = `
+        .log-lvl-btn {
+          padding: 6px 18px; border-radius: 20px; cursor: pointer;
+          font-size: 13px; font-weight: 600; border: 1px solid var(--card-border);
+          background: transparent; color: var(--text-dim); transition: all .15s;
+        }
+        .log-lvl-btn:hover  { border-color: var(--accent); color: var(--accent); }
+        .log-lvl-btn.active { background: rgba(211,84,0,0.15); border-color: var(--accent); color: var(--accent); }
+      `;
+      document.head.appendChild(s);
+    })();
+
+    function loadSettingsView() {
+      const level = (preferences.log_level || 'info').toLowerCase();
+      document.querySelectorAll('.log-lvl-btn').forEach(btn =>
+        btn.classList.toggle('active', btn.dataset.level === level)
+      );
+      const tooltipsEl = document.getElementById('settings-tooltips');
+      if (tooltipsEl) tooltipsEl.checked = !!preferences.show_tooltips;
+      const fb = document.getElementById('settings-feedback');
+      if (fb) fb.style.display = 'none';
+    }
+
+    document.getElementById('log-level-pills').addEventListener('click', e => {
+      const btn = e.target.closest('.log-lvl-btn');
+      if (!btn) return;
+      document.querySelectorAll('.log-lvl-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+    });
+
+    document.getElementById('settings-save').addEventListener('click', async () => {
+      const saveBtn  = document.getElementById('settings-save');
+      const fb       = document.getElementById('settings-feedback');
+      const level    = document.querySelector('.log-lvl-btn.active')?.dataset.level || 'info';
+      const tooltips = document.getElementById('settings-tooltips')?.checked ?? true;
+
+      saveBtn.disabled = true;
+      saveBtn.innerHTML = '<i data-lucide="loader-2" style="width:14px"></i> Saving…';
+      lucide.createIcons();
+
+      try {
+        const resp = await fetch('/preferences', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ log_level: level, show_tooltips: tooltips, theme: preferences.theme || 'dark' }),
+        });
+        const data = await resp.json();
+        if (data.ok) {
+          preferences.log_level     = level;
+          preferences.show_tooltips = tooltips;
+          document.body.classList.toggle('no-tooltips', !tooltips);
+          fb.textContent = '\u2713 Saved'; fb.style.color = '#3fb950'; fb.style.display = 'inline';
+        } else {
+          fb.textContent = '\u2715 ' + (data.error || 'Unknown error'); fb.style.color = '#f85149'; fb.style.display = 'inline';
+        }
+      } catch {
+        fb.textContent = '\u2715 Network error'; fb.style.color = '#f85149'; fb.style.display = 'inline';
+      } finally {
+        saveBtn.disabled = false;
+        saveBtn.innerHTML = '<i data-lucide="save" style="width:14px"></i> Save Settings';
+        lucide.createIcons();
+        setTimeout(() => { if (fb) fb.style.display = 'none'; }, 3000);
+      }
+    });
 
     // ─── Exec Modal ─────────────────────────────────────────────────────────────
     let currentExecServiceId = null;
