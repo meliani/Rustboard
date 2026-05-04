@@ -909,11 +909,15 @@
       const prevScrollHeight = terminal.scrollHeight;
       const prevScrollTop = terminal.scrollTop;
       document.getElementById('log-streaming-status').textContent = 'Fetching logs...';
+      const fetchController = new AbortController();
+      const fetchTimeout = setTimeout(() => fetchController.abort(), 35000);
       try {
         const res  = await fetch('/services/logs', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: currentLogServiceId, lines: currentLogLines })
+          body: JSON.stringify({ id: currentLogServiceId, lines: currentLogLines }),
+          signal: fetchController.signal
         });
+        clearTimeout(fetchTimeout);
         const data = await res.json();
         document.getElementById('log-loading').style.display = 'none';
         if (data.ok) {
@@ -930,10 +934,14 @@
             `Error: ${data.error} — ${isLiveLogs ? 'retrying…' : 'check host'}`;
         }
       } catch (e) {
+        clearTimeout(fetchTimeout);
         // Network/SSH error: preserve existing terminal content, show status
         document.getElementById('log-loading').style.display = 'none';
+        const isTimeout = e.name === 'AbortError';
         document.getElementById('log-streaming-status').textContent =
-          `Connection error: ${e.message || e} — ${isLiveLogs ? 'retrying…' : ''}`;
+          isTimeout
+            ? `Timed out waiting for SSH response — ${isLiveLogs ? 'retrying…' : 'try again'}`
+            : `Connection error: ${e.message || e} — ${isLiveLogs ? 'retrying…' : ''}`;
       } finally {
         isFetchingLogs = false;
       }
