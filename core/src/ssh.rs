@@ -65,18 +65,18 @@ pub async fn run_command_with_timeout(
     let target = ssh_target(ssh_user, host);
     tracing::debug!("SSH run on {}: {}", target, cmd);
 
+    // kill_on_drop(true) on the Command builder ensures the spawned Child
+    // sends SIGKILL when dropped — which happens when the timeout fires and
+    // Tokio cancels the wait_with_output() future.
     let mut child = Command::new("ssh")
         .args(SSH_OPTS)
         .arg(&target)
         .arg(cmd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .context("failed to spawn ssh")?;
-
-    // kill_on_drop ensures the child process is SIGKILL'd when this Child
-    // is dropped — which happens when the timeout cancels wait_with_output().
-    child.kill_on_drop(true);
 
     match tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs),
