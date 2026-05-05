@@ -882,12 +882,20 @@
     // ─── Logs ───────────────────────────────────────────────────────────────────
     let currentLogServiceId = null, currentLogLines = 100;
     let isLiveLogs = false, liveLogsInterval = null, autoScroll = true;
-    let isFetchingLogs = false;  // guard against overlapping requests
+    let isFetchingLogs = false;         // guard against overlapping requests
+    let activeFetchController = null;   // module-level so service-switch can abort it
     const LOG_HISTORY_STEP = 500;
     const LOG_TOP_FETCH_THRESHOLD = 20;
 
     async function showLogs(id) {
-      if (currentLogServiceId !== id) { currentLogServiceId = id; currentLogLines = 100; }
+      if (currentLogServiceId !== id) {
+        // Abort any in-flight request for the previous service so we don't
+        // render stale data and so isFetchingLogs is immediately freed.
+        if (activeFetchController) { activeFetchController.abort(); activeFetchController = null; }
+        isFetchingLogs = false;
+        currentLogServiceId = id;
+        currentLogLines = 100;
+      }
       const service = services.find(s => s.id === id);
       if (!service) return;
       document.getElementById('log-service-name').textContent = `Logs: ${service.name}`;
@@ -909,15 +917,16 @@
       const prevScrollHeight = terminal.scrollHeight;
       const prevScrollTop = terminal.scrollTop;
       document.getElementById('log-streaming-status').textContent = 'Fetching logs...';
-      const fetchController = new AbortController();
-      const fetchTimeout = setTimeout(() => fetchController.abort(), 35000);
+      activeFetchController = new AbortController();
+      const fetchTimeout = setTimeout(() => activeFetchController && activeFetchController.abort(), 35000);
       try {
         const res  = await fetch('/services/logs', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: currentLogServiceId, lines: currentLogLines }),
-          signal: fetchController.signal
+          signal: activeFetchController.signal
         });
         clearTimeout(fetchTimeout);
+        activeFetchController = null;
         const data = await res.json();
         document.getElementById('log-loading').style.display = 'none';
         if (data.ok) {
@@ -935,13 +944,17 @@
         }
       } catch (e) {
         clearTimeout(fetchTimeout);
+        activeFetchController = null;
         // Network/SSH error: preserve existing terminal content, show status
         document.getElementById('log-loading').style.display = 'none';
-        const isTimeout = e.name === 'AbortError';
-        document.getElementById('log-streaming-status').textContent =
-          isTimeout
-            ? `Timed out waiting for SSH response — ${isLiveLogs ? 'retrying…' : 'try again'}`
-            : `Connection error: ${e.message || e} — ${isLiveLogs ? 'retrying…' : ''}`;
+        const isAborted = e.name === 'AbortError';
+        // If aborted because user switched services, don't overwrite the new service's status
+        if (!isAborted || currentLogServiceId === null) {
+          document.getElementById('log-streaming-status').textContent =
+            isAborted
+              ? `Timed out waiting for SSH response — ${isLiveLogs ? 'retrying…' : 'try again'}`
+              : `Connection error: ${e.message || e} — ${isLiveLogs ? 'retrying…' : ''}`;
+        }
       } finally {
         isFetchingLogs = false;
       }
@@ -1001,7 +1014,13 @@
     document.getElementById('log-terminal').addEventListener('scroll', e => {
       const t = e.target;
       autoScroll = (t.scrollTop + t.offsetHeight) >= (t.scrollHeight - 20);
-      if (t.scrollTop <= LOG_TOP_FETCH_THRESHOLD && !isFetchingLogs) {
+      // Only load history when: user scrolled near top AND content actually overflows
+      // the viewport. Without the overflow guard, containers with few log lines
+      // (scrollHeight <= offsetHeight) always have scrollTop=0, triggering unbounded
+      // currentLogLines growth on every scroll event.
+      if (t.scrollTop <= LOG_TOP_FETCH_THRESHOLD
+          && !isFetchingLogs
+          && t.scrollHeight > t.offsetHeight + LOG_TOP_FETCH_THRESHOLD) {
         currentLogLines += LOG_HISTORY_STEP;
         fetchLogs({ preserveViewport: true });
       }
